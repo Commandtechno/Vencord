@@ -1,0 +1,45 @@
+.tz-clock {
+  color: var(--interactive-normal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tz-clickable {
+  cursor: pointer;
+}
+
+.tz-clickable:hover {
+  color: var(--interactive-hover);
+}
+
+.tz-profile-speaker {
+  width: var(--custom-nickname-icon-size);
+  height: var(--custom-nickname-icon-size);
+}
+
+.tz-tooltip-container {
+  max-width: 50vw;
+}
+
+.tz-tooltip-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tz-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tz-guild-icon {
+  border-radius: 100%;
+  align-self: center;
+}
+
+.tz-vc-members {
+  display: flex;
+  gap: 6px;
+}
