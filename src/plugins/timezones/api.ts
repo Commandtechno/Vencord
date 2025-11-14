@@ -1,25 +1,20 @@
-import { settings } from "./settings";
+import * as DataStore from '@api/DataStore';
 
-const API = "https://commandtechno.com/vctz";
+const DATASTORE_KEY = "vencord-tzdb";
 
-export const userTimezones = new Map();
+export const userTimezones = new Map<string, string>();
 
 export const setTimezone = async (userId: string, tz: string) => {
   userTimezones.set(userId, tz);
-  const res = await fetch(
-    `https://commandtechno.com/vctz/store?token=${settings.store.apiToken
-    }&id=${userId}&tz=${encodeURIComponent(tz)}`
-  );
-
-  return res.ok;
+  await DataStore.set(DATASTORE_KEY, userTimezones);
 };
 
 export const refreshTimezones = async () => {
-  const latestTimezones = (await fetch(
-    `${API}/list?token=${settings.store.apiToken}`
-  ).then((res) => res.json())) as Record<string, string>;
+  const tzdb = await DataStore.get<Map<string, string>>(DATASTORE_KEY);
+  if (!tzdb) return;
 
-  userTimezones.clear();
-  for (const [id, tz] of Object.entries(latestTimezones))
-    userTimezones.set(id, tz);
+
+  for (const [userId, tz] of tzdb) {
+    userTimezones.set(userId, tz);
+  }
 };

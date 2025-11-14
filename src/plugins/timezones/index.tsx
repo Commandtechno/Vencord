@@ -139,11 +139,10 @@ export default definePlugin({
         const tz: string | undefined = findOption(args, "tz");
         if (!user || !tz) return;
 
-        console.log({ user, tz });
 
-        const ok = await setTimezone(user, tz);
+        await setTimezone(user, tz);
         sendBotMessage(ctx.channel.id, {
-          content: ok ? `set <@${user}> to ${tz}` : "uh oh",
+          content: `set <@${user}> to ${tz}`,
         });
       },
     },
