@@ -1,0 +1,23 @@
+.transcribe-accessory {
+    margin-top: 0.5em;
+    font-weight: 400;
+}
+
+.transcribe-transcription {
+    color: var(--text-muted);
+    font-style: italic;
+    line-height: 1.5;
+}
+
+.transcribe-transcription:not(.transcribe-expanded) {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.transcribe-segment.transcribe-active {
+    color: white;
+    margin-left: 5px;
+    transition: margin-left 0.2s ease-in-out;
+}
