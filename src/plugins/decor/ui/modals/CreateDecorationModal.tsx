@@ -64,7 +64,7 @@ function CreateDecorationModal(props: ModalProps) {
     >
         <ModalHeader separator={false} className={cl("modal-header")}>
             <Text
-                color="header-primary"
+                color="text-strong"
                 variant="heading-lg/semibold"
                 tag="h1"
                 style={{ flexGrow: 1 }}
@@ -115,7 +115,7 @@ function CreateDecorationModal(props: ModalProps) {
                     </div>
                     <div>
                         <AvatarDecorationModalPreview
-                            avatarDecorationOverride={decoration}
+                            avatarDecoration={decoration}
                             user={UserStore.getCurrentUser()}
                         />
                     </div>

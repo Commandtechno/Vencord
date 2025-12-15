@@ -21,7 +21,7 @@ function GuidelinesModal(props: ModalProps) {
     >
         <ModalHeader separator={false} className={cl("modal-header")}>
             <Text
-                color="header-primary"
+                color="text-strong"
                 variant="heading-lg/semibold"
                 tag="h1"
                 style={{ flexGrow: 1 }}
@@ -42,7 +42,7 @@ function GuidelinesModal(props: ModalProps) {
             </Forms.FormText>
         </ModalContent>
         <ModalFooter className={cl("modal-footer")}>
-            <Flex style={{ gap: "4px" }}>
+            <Flex gap="4px">
                 <Button
                     onClick={() => {
                         settings.store.agreedToGuidelines = true;

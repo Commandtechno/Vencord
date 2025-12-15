@@ -95,7 +95,7 @@ function ChangeDecorationModal(props: ModalProps) {
     const [tryingDecoration, setTryingDecoration] = useState<Decoration | null | undefined>(undefined);
     const isTryingDecoration = typeof tryingDecoration !== "undefined";
 
-    const avatarDecorationOverride = tryingDecoration != null ? decorationToAvatarDecoration(tryingDecoration) : tryingDecoration;
+    const avatarDecoration = tryingDecoration != null ? decorationToAvatarDecoration(tryingDecoration) : tryingDecoration;
 
     const {
         decorations,
@@ -143,7 +143,7 @@ function ChangeDecorationModal(props: ModalProps) {
     >
         <ModalHeader separator={false} className={cl("modal-header")}>
             <Text
-                color="header-primary"
+                color="text-strong"
                 variant="heading-lg/semibold"
                 tag="h1"
                 style={{ flexGrow: 1 }}
@@ -197,14 +197,14 @@ function ChangeDecorationModal(props: ModalProps) {
                 />
                 <div className={cl("change-decoration-modal-preview")}>
                     <AvatarDecorationModalPreview
-                        avatarDecorationOverride={avatarDecorationOverride}
+                        avatarDecoration={avatarDecoration}
                         user={UserStore.getCurrentUser()}
                     />
                     {isActiveDecorationPreset && <Forms.FormTitle className="">Part of the {activeDecorationPreset.name} Preset</Forms.FormTitle>}
                     {typeof activeSelectedDecoration === "object" &&
                         <Text
                             variant="text-sm/semibold"
-                            color="header-primary"
+                            color="text-strong"
                         >
                             {activeSelectedDecoration?.alt}
                         </Text>
