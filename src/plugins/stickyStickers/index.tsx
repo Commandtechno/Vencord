@@ -16,6 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+import "./style.css";
+
 import { Devs } from "@utils/constants";
 import { getCurrentChannel, sendMessage } from "@utils/discord";
 import { Logger } from "@utils/Logger";
@@ -467,23 +469,35 @@ function StickerOverlay() {
   return (
     <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 2147483647 }}>
       {visible.map(({ sticker: s, pos }) => (
-        <img
+        // The entrance animation lives on this wrapper (a constant translate(-50%,-50%),
+        // so it hands off cleanly to the inline style once it finishes) - the locked
+        // rotation/scale live on the inner img instead, so the two never fight over
+        // the same transform property.
+        <div
           key={s.messageId}
-          src={s.url}
-          onLoad={() => logger.debug("Overlay sticker image loaded", s.messageId, s.url)}
-          onError={() => logger.warn("Overlay sticker image FAILED to load", s.messageId, s.url)}
+          className="vc-sticky-pop-in"
           style={{
             position: "fixed",
             left: pos.left,
             top: pos.top,
             width: 96,
-            maxWidth: 96,
-            borderRadius: 12,
-            filter: "drop-shadow(0 4px 10px rgba(0, 0, 0, .35))",
-            transform: `translate(-50%, -50%) rotate(${s.rotation}deg) scale(${s.scale})`,
+            transform: "translate(-50%, -50%)",
             pointerEvents: "none"
           }}
-        />
+        >
+          <img
+            src={s.url}
+            onLoad={() => logger.debug("Overlay sticker image loaded", s.messageId, s.url)}
+            onError={() => logger.warn("Overlay sticker image FAILED to load", s.messageId, s.url)}
+            style={{
+              display: "block",
+              width: "100%",
+              borderRadius: 12,
+              filter: "drop-shadow(0 4px 10px rgba(0, 0, 0, .35))",
+              transform: `rotate(${s.rotation}deg) scale(${s.scale})`
+            }}
+          />
+        </div>
       ))}
     </div>
   );

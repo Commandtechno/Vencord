@@ -1,0 +1,15 @@
+@keyframes vc-sticky-pop-in {
+    from {
+        opacity: 0;
+        transform: translate(-50%, calc(-50% + 28px));
+    }
+
+    to {
+        opacity: 1;
+        transform: translate(-50%, -50%);
+    }
+}
+
+.vc-sticky-pop-in {
+    animation: vc-sticky-pop-in 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
