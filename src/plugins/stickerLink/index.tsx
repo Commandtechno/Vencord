@@ -17,8 +17,8 @@
 */
 
 import { findGroupChildrenByChildId, NavContextMenuPatchCallback } from "@api/ContextMenu";
+import { copyToClipboard } from "@utils/clipboard";
 import { Devs } from "@utils/constants";
-import { copyWithToast } from "@utils/misc";
 import definePlugin from "@utils/types";
 import { findStoreLazy } from "@webpack";
 import { Constants, FluxDispatcher, Menu, RestAPI } from "@webpack/common";
@@ -69,7 +69,7 @@ function buildMenuItem(fetchUrl: () => Promise<string> | string) {
         id="copy-sticker-link"
         key="copy-sticker-link"
         label="Copy Link"
-        action={async () => copyWithToast(await fetchUrl())}
+        action={async () => copyToClipboard(await fetchUrl())}
       />
       <Menu.MenuItem
         id="open-sticker-link"
