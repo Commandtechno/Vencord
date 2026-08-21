@@ -20,7 +20,7 @@ import { classNameFactory } from '@api/Styles';
 import { Message } from "@vencord/discord-types";
 import { MessageFlags } from "@vencord/discord-types/enums";
 import { useEffect, useRef, useState } from "@webpack/common";
-import { settings } from './settings';
+import { getTranscription } from './cache';
 
 export interface Segment {
   text: string;
@@ -54,40 +54,21 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
   }, [segments]);
 
   useEffect(() => {
-    (async () => {
-      const { url } = message.attachments[0];
+    const { id, url } = message.attachments[0];
+    let cancelled = false;
 
-      try {
-        const resp = await fetch(`https://api.runpod.ai/v2/${settings.store.endpoint}/runsync `, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${settings.store.apiKey}`,
-            'Content-Type': "application/json"
-          },
-          body: JSON.stringify({
-            input: {
-              audio: url,
-            }
-          })
-        });
+    getTranscription(id, url)
+      .then(segments => {
+        if (!cancelled) setSegments(segments);
+      })
+      .catch(err => {
+        if (!cancelled) setError(`${err}`);
+      });
 
-        if (!resp.ok) {
-          throw new Error(`bad status ${resp.status}`);
-        }
-
-        const result = await resp.json();
-        if (result.status !== 'COMPLETED') {
-          console.error(result);
-          throw new Error('transcribe failed');
-        }
-
-        setSegments(result.output.segments);
-      } catch (err) {
-        setError(`${err}`);
-        return;
-      }
-    })();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [message.attachments[0].id]);
 
   const [clamped, setClamped] = useState(false);
   const [expanded, setExpanded] = useState(false);
