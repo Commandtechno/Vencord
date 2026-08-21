@@ -37,13 +37,13 @@ const UNSUPPORTED_FORMAT_TYPE = 3;
 const DRAG_THRESHOLD_PX = 8;
 
 // We (ab)use a message's own content as storage for where its sticker should float:
-// "SS{anchorMessageId,dx,dy,rotationDeg}". The sticker is positioned relative to the
+// "SS{anchorMessageId,dx,dy,rotationDeg,scale}". The sticker is positioned relative to the
 // message it landed nearest to (dx/dy offset from that message's top-left corner), so it
 // scrolls along with chat instead of staying pinned to a fixed screen position. An
 // anchorMessageId of "0" means no message was found to anchor to, and dx/dy are instead
 // treated as plain fixed viewport coordinates. Any message - from anyone - matching this
 // plus exactly one sticker is treated as a placed sticker rather than a normal message.
-const XY_PATTERN = /^SS\{(\d+),(-?\d+),(-?\d+),(-?\d+)\}$/;
+const XY_PATTERN = /^SS\{(\d+),(-?\d+),(-?\d+),(-?\d+),(\d+(?:\.\d+)?)\}$/;
 
 function getUrl(id: string, formatType: number) {
   return new URL(
@@ -74,6 +74,7 @@ interface OverlaySticker {
   dx: number;
   dy: number;
   rotation: number;
+  scale: number;
 }
 
 function parseStickyMessage(message: StickyMessage | null | undefined): OverlaySticker | null {
@@ -109,7 +110,8 @@ function parseStickyMessage(message: StickyMessage | null | undefined): OverlayS
     anchorMessageId: match[1],
     dx: parseInt(match[2], 10),
     dy: parseInt(match[3], 10),
-    rotation: parseInt(match[4], 10)
+    rotation: parseInt(match[4], 10),
+    scale: parseFloat(match[5])
   };
   logger.info("parseStickyMessage: parsed", message.id, "as", parsed);
   return parsed;
@@ -126,8 +128,29 @@ function registerIfSticky(message: StickyMessage | null | undefined) {
   const parsed = parseStickyMessage(message);
   if (!parsed) return;
   overlayStickers.set(parsed.messageId, parsed);
-  logger.info("Registered overlay sticker from message", parsed.messageId, "anchored to", parsed.anchorMessageId, "offset", { dx: parsed.dx, dy: parsed.dy }, "rotation", parsed.rotation);
+  logger.info("Registered overlay sticker from message", parsed.messageId, "anchored to", parsed.anchorMessageId, "offset", { dx: parsed.dx, dy: parsed.dy }, "rotation", parsed.rotation, "scale", parsed.scale);
   notify();
+  // The marker message's own DOM row might not exist yet the instant we're notified (React
+  // hasn't committed it) - the render patch keeps its sticker from ever showing in the
+  // meantime, but give React a couple of frames then notify again so the row-hiding effect
+  // gets a chance to catch the freshly-mounted element too.
+  requestAnimationFrame(() => requestAnimationFrame(notify));
+}
+
+// Hides a placed-sticker message's entire row (avatar, username, the raw SS{...} text -
+// everything), not just its sticker. display:none rather than visibility:hidden so it
+// doesn't leave a gap in the message list.
+function hideMarkerMessageRow(s: OverlaySticker) {
+  const el = getMessageElement(s.channelId, s.messageId);
+  if (el && el.style.display !== "none") {
+    el.style.display = "none";
+    logger.debug("Hid marker message row", s.messageId);
+  }
+}
+
+function restoreMarkerMessageRow(s: OverlaySticker) {
+  const el = getMessageElement(s.channelId, s.messageId);
+  if (el) el.style.display = "";
 }
 
 function rescanCurrentChannel() {
@@ -221,13 +244,20 @@ let suppressNextClick = false;
 
 // The ghost swings like it's on a pendant while dragging, based on how fast it's moving
 // sideways, and settles back toward level as movement slows - whatever angle it's at the
-// instant you drop is what gets locked into the placed sticker.
+// instant you drop is what gets locked into the placed sticker. Scale rides the same
+// system: faster overall movement puffs it up, easing back down as it slows, and whatever
+// size it's at on drop is what gets locked in too.
 const ROTATION_MAX_DEG = 35;
 const ROTATION_VELOCITY_SCALE = 25; // deg per (px/ms) of horizontal speed
-const ROTATION_SMOOTHING = 0.3; // how quickly rotation eases toward its target each move event
+const SCALE_BASE = 1;
+const SCALE_MAX = 1.8;
+const SCALE_VELOCITY_SCALE = 0.35; // scale increase per (px/ms) of overall speed
+const DYNAMICS_SMOOTHING = 0.3; // how quickly rotation/scale ease toward their target each move event
 
 let rotation = 0;
+let scale = SCALE_BASE;
 let lastMoveX = 0;
+let lastMoveY = 0;
 let lastMoveTime = 0;
 
 function clamp(value: number, min: number, max: number) {
@@ -241,7 +271,7 @@ function removeGhost() {
 
 function updateGhostTransform() {
   if (!ghost) return;
-  ghost.style.transform = `translate(-50%, -50%) rotate(${rotation.toFixed(1)}deg)`;
+  ghost.style.transform = `translate(-50%, -50%) rotate(${rotation.toFixed(1)}deg) scale(${scale.toFixed(2)})`;
 }
 
 function updateGhostPosition(x: number, y: number) {
@@ -250,15 +280,22 @@ function updateGhostPosition(x: number, y: number) {
   ghost.style.top = `${y}px`;
 }
 
-function updateGhostRotation(e: PointerEvent) {
+function updateGhostDynamics(e: PointerEvent) {
   const now = performance.now();
   const dt = now - lastMoveTime;
   if (dt > 0) {
     const velocityX = (e.clientX - lastMoveX) / dt; // px per ms
-    const target = clamp(velocityX * ROTATION_VELOCITY_SCALE, -ROTATION_MAX_DEG, ROTATION_MAX_DEG);
-    rotation += (target - rotation) * ROTATION_SMOOTHING;
+    const velocityY = (e.clientY - lastMoveY) / dt;
+    const speed = Math.hypot(velocityX, velocityY);
+
+    const targetRotation = clamp(velocityX * ROTATION_VELOCITY_SCALE, -ROTATION_MAX_DEG, ROTATION_MAX_DEG);
+    rotation += (targetRotation - rotation) * DYNAMICS_SMOOTHING;
+
+    const targetScale = clamp(SCALE_BASE + speed * SCALE_VELOCITY_SCALE, SCALE_BASE, SCALE_MAX);
+    scale += (targetScale - scale) * DYNAMICS_SMOOTHING;
   }
   lastMoveX = e.clientX;
+  lastMoveY = e.clientY;
   lastMoveTime = now;
   updateGhostTransform();
 }
@@ -294,7 +331,9 @@ function beginDrag(e: PointerEvent, drag: PendingDrag) {
   logger.info("pointer-drag: started dragging sticker", drag.id);
 
   rotation = 0;
+  scale = SCALE_BASE;
   lastMoveX = e.clientX;
+  lastMoveY = e.clientY;
   lastMoveTime = performance.now();
 
   const url = findTileImageUrl(drag.tile) || getUrl(sticker.id, sticker.format_type);
@@ -305,7 +344,8 @@ function beginDrag(e: PointerEvent, drag: PendingDrag) {
   ghost.addEventListener("error", ev => logger.warn("pointer-drag: ghost image FAILED to load", url, ev));
   ghost.src = url;
   ghost.style.cssText = "position:fixed;z-index:2147483647;width:96px;max-width:96px;"
-    + "pointer-events:none;opacity:.85;";
+    + "pointer-events:none;opacity:.85;border-radius:12px;"
+    + "filter:drop-shadow(0 4px 10px rgba(0,0,0,.35));";
   document.body.appendChild(ghost);
   updateGhostPosition(e.clientX, e.clientY);
   updateGhostTransform();
@@ -323,7 +363,7 @@ function onPointerMove(e: PointerEvent) {
   }
 
   updateGhostPosition(e.clientX, e.clientY);
-  updateGhostRotation(e);
+  updateGhostDynamics(e);
 }
 
 function onPointerUp(e: PointerEvent) {
@@ -346,6 +386,7 @@ function onPointerUp(e: PointerEvent) {
   }
 
   const lockedRotation = Math.round(rotation);
+  const lockedScale = Number(scale.toFixed(2));
   const anchorEl = findAnchorMessageElement(e.clientX, e.clientY);
   const anchorInfo = anchorEl && parseMessageElementId(anchorEl.id);
 
@@ -354,13 +395,13 @@ function onPointerUp(e: PointerEvent) {
     const rect = anchorEl!.getBoundingClientRect();
     const dx = Math.round(e.clientX - rect.left);
     const dy = Math.round(e.clientY - rect.top);
-    content = `SS{${anchorInfo.messageId},${dx},${dy},${lockedRotation}}`;
-    logger.info("pointerup: dropped sticker", drag.id, "anchored to message", anchorInfo.messageId, "offset", { dx, dy }, "rotation", lockedRotation);
+    content = `SS{${anchorInfo.messageId},${dx},${dy},${lockedRotation},${lockedScale}}`;
+    logger.info("pointerup: dropped sticker", drag.id, "anchored to message", anchorInfo.messageId, "offset", { dx, dy }, "rotation", lockedRotation, "scale", lockedScale);
   } else {
     const x = Math.round(e.clientX);
     const y = Math.round(e.clientY);
-    content = `SS{0,${x},${y},${lockedRotation}}`;
-    logger.warn("pointerup: no nearby message to anchor to - falling back to fixed viewport position", { x, y }, "rotation", lockedRotation);
+    content = `SS{0,${x},${y},${lockedRotation},${lockedScale}}`;
+    logger.warn("pointerup: no nearby message to anchor to - falling back to fixed viewport position", { x, y }, "rotation", lockedRotation, "scale", lockedScale);
   }
 
   logger.info("pointerup: sending to channel", channel.id, "content:", content);
@@ -410,10 +451,16 @@ function StickerOverlay() {
 
   const currentChannelId = getCurrentChannel()?.id;
   const all = Array.from(overlayStickers.values());
-  const visible = all
-    .filter(s => s.channelId === currentChannelId)
+  const inChannel = all.filter(s => s.channelId === currentChannelId);
+  const visible = inChannel
     .map(s => ({ sticker: s, pos: computeStickerPosition(s) }))
     .filter((v): v is { sticker: OverlaySticker; pos: { left: number; top: number; }; } => v.pos !== null);
+
+  // Every render (including scroll-driven ones) is a chance for a marker message's row to
+  // have just mounted - keep re-hiding it until it sticks.
+  useEffect(() => {
+    inChannel.forEach(hideMarkerMessageRow);
+  });
 
   logger.debug("StickerOverlay render: currentChannelId=", currentChannelId, "total registered=", all.length, "visible=", visible.length);
 
@@ -431,7 +478,9 @@ function StickerOverlay() {
             top: pos.top,
             width: 96,
             maxWidth: 96,
-            transform: `translate(-50%, -50%) rotate(${s.rotation}deg)`,
+            borderRadius: 12,
+            filter: "drop-shadow(0 4px 10px rgba(0, 0, 0, .35))",
+            transform: `translate(-50%, -50%) rotate(${s.rotation}deg) scale(${s.scale})`,
             pointerEvents: "none"
           }}
         />
@@ -557,6 +606,7 @@ export default definePlugin({
     container?.remove();
     container = undefined;
 
+    overlayStickers.forEach(restoreMarkerMessageRow);
     overlayStickers.clear();
 
     logger.info("Stopped - listeners removed");
