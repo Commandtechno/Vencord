@@ -39,13 +39,14 @@ const UNSUPPORTED_FORMAT_TYPE = 3;
 const DRAG_THRESHOLD_PX = 8;
 
 // We (ab)use a message's own content as storage for where its sticker should float:
-// "SS{anchorMessageId,dx,dy,rotationDeg,scale}". The sticker is positioned relative to the
-// message it landed nearest to (dx/dy offset from that message's top-left corner), so it
-// scrolls along with chat instead of staying pinned to a fixed screen position. An
-// anchorMessageId of "0" means no message was found to anchor to, and dx/dy are instead
-// treated as plain fixed viewport coordinates. Any message - from anyone - matching this
-// plus exactly one sticker is treated as a placed sticker rather than a normal message.
-const XY_PATTERN = /^SS\{(\d+),(-?\d+),(-?\d+),(-?\d+),(\d+(?:\.\d+)?)\}$/;
+// "SS{dx,dy,rotationDeg,scale}". The message it landed nearest to is recorded as this
+// message's reply-to (message_reference) rather than in the content, so the sticker is
+// positioned relative to that anchor message (dx/dy offset from its top-left corner) and
+// scrolls along with chat instead of staying pinned to a fixed screen position. A message
+// with no reference means no message was found to anchor to, and dx/dy are instead treated
+// as plain fixed viewport coordinates. Any message - from anyone - matching this plus
+// exactly one sticker is treated as a placed sticker rather than a normal message.
+const XY_PATTERN = /^SS\{(-?\d+),(-?\d+),(-?\d+),(\d+(?:\.\d+)?)\}$/;
 
 function getUrl(id: string, formatType: number) {
   return new URL(
@@ -66,6 +67,8 @@ interface StickyMessage {
   channelId?: string;
   content: string;
   stickerItems?: StickerItem[];
+  message_reference?: { message_id: string; } | null;
+  messageReference?: { message_id: string; } | null;
 }
 
 interface OverlaySticker {
@@ -105,15 +108,18 @@ function parseStickyMessage(message: StickyMessage | null | undefined): OverlayS
     return null;
   }
 
+  const reference = message.message_reference ?? message.messageReference;
+  const anchorMessageId = reference?.message_id ?? "0";
+
   const parsed = {
     messageId: message.id,
     channelId,
     url: getUrl(sticker.id, sticker.format_type),
-    anchorMessageId: match[1],
-    dx: parseInt(match[2], 10),
-    dy: parseInt(match[3], 10),
-    rotation: parseInt(match[4], 10),
-    scale: parseFloat(match[5])
+    anchorMessageId,
+    dx: parseInt(match[1], 10),
+    dy: parseInt(match[2], 10),
+    rotation: parseInt(match[3], 10),
+    scale: parseFloat(match[4])
   };
   logger.info("parseStickyMessage: parsed", message.id, "as", parsed);
   return parsed;
@@ -393,22 +399,25 @@ function onPointerUp(e: PointerEvent) {
   const anchorInfo = anchorEl && parseMessageElementId(anchorEl.id);
 
   let content: string;
+  // MessageReferenceType.DEFAULT (0) - a normal reply, as opposed to a forward (1)
+  let messageReference: { channel_id: string; message_id: string; type: 0; } | undefined;
   if (anchorInfo) {
     const rect = anchorEl!.getBoundingClientRect();
     const dx = Math.round(e.clientX - rect.left);
     const dy = Math.round(e.clientY - rect.top);
-    content = `SS{${anchorInfo.messageId},${dx},${dy},${lockedRotation},${lockedScale}}`;
+    content = `SS{${dx},${dy},${lockedRotation},${lockedScale}}`;
+    messageReference = { channel_id: channel.id, message_id: anchorInfo.messageId, type: 0 };
     logger.info("pointerup: dropped sticker", drag.id, "anchored to message", anchorInfo.messageId, "offset", { dx, dy }, "rotation", lockedRotation, "scale", lockedScale);
   } else {
     const x = Math.round(e.clientX);
     const y = Math.round(e.clientY);
-    content = `SS{0,${x},${y},${lockedRotation},${lockedScale}}`;
+    content = `SS{${x},${y},${lockedRotation},${lockedScale}}`;
     logger.warn("pointerup: no nearby message to anchor to - falling back to fixed viewport position", { x, y }, "rotation", lockedRotation, "scale", lockedScale);
   }
 
-  logger.info("pointerup: sending to channel", channel.id, "content:", content);
+  logger.info("pointerup: sending to channel", channel.id, "content:", content, "messageReference:", messageReference);
 
-  sendMessage(channel.id, { content }, true, { stickerIds: [drag.id] })
+  sendMessage(channel.id, { content }, true, { stickerIds: [drag.id], ...(messageReference && { messageReference }) })
     .then(() => logger.info("Sent sticker message successfully"))
     .catch((err: unknown) => logger.error("Failed to send sticker message", err));
 }
