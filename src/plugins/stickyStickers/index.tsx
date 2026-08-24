@@ -476,7 +476,7 @@ function StickerOverlay() {
   logger.debug("StickerOverlay render: currentChannelId=", currentChannelId, "total registered=", all.length, "visible=", visible.length);
 
   return (
-    <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 2147483647 }}>
+    <div style={{ position: "fixed", inset: 0, pointerEvents: "none" }}>
       {visible.map(({ sticker: s, pos }) => (
         // The entrance animation lives on this wrapper (a constant translate(-50%,-50%),
         // so it hands off cleanly to the inline style once it finishes) - the locked
