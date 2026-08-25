@@ -68,7 +68,10 @@ export const CspPolicies: PolicyMap = {
     "dearrow-thumb.ajay.app": ImageSrc, // Dearrow Thumbnail CDN
     "usrbg.is-hardly.online": ImageSrc, // USRBG API
     "icons.duckduckgo.com": ImageSrc, // DuckDuckGo Favicon API (Reverse Image Search)
-    "api.runpod.ai": ConnectSrc, // runpod api for transcribe plugin
+    // whisper model downloads for transcribe plugin (transformers.js)
+    "huggingface.co": ConnectSrc,
+    "*.huggingface.co": ConnectSrc,
+    "*.hf.co": ConnectSrc,
 
     // Tenor, used by TenorSearch plugin and some themes
     "*.tenor.com": ImageAndMediaSrc,

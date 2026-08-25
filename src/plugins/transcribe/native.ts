@@ -1,6 +1,6 @@
 /*
  * Vencord, a modification for Discord's desktop app
- * Copyright (c) 2022 Vendicated and contributors
+ * Copyright (c) 2023 Vendicated and contributors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,20 +14,19 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
+*/
 
-import './styles.css';
+import { IpcMainInvokeEvent } from "electron";
 
-import { addMessageAccessory } from "@api/MessageAccessories";
-import { Devs } from "@utils/constants";
-import definePlugin from "@utils/types";
-import { TranscriptionAccessory } from "./TranscriptionAccesory";
+// the discord cdn doesn't send CORS headers, so the renderer can't fetch
+// attachments itself. fetch them here in the main process instead
+export async function fetchAudio(_: IpcMainInvokeEvent, url: string): Promise<ArrayBuffer> {
+    const { host } = new URL(url);
+    if (host !== "cdn.discordapp.com" && host !== "media.discordapp.net")
+        throw new Error(`refusing to fetch from ${host}`);
 
-export default definePlugin({
-  name: "Transcriber",
-  authors: [Devs.Commandtechno],
-  description: Math.random() > 0.5 ? "le transcripteur" : 'der transkribierer',
-  start() {
-    addMessageAccessory("transcribe", props => <TranscriptionAccessory message={props.message} />);
-  },
-});
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`bad status ${res.status}`);
+
+    return res.arrayBuffer();
+}

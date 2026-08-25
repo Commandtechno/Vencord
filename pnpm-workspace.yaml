@@ -15,6 +15,9 @@ allowedDeprecatedVersions:
 strictPeerDependencies: false
 allowBuilds:
   esbuild: true
+  onnxruntime-node: false
+  protobufjs: false
+  sharp: false
 pmOnFail: warn
 minimumReleaseAgeExclude:
   - '@vencord/*'
