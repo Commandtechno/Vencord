@@ -142,11 +142,31 @@ const patchCsp = (headers: PolicyMap) => {
     }
 };
 
+// hosts that don't send CORS headers but that we want to be able to fetch
+// from the renderer (e.g. voice message audio for the transcribe plugin).
+// these responses are not credentialed and attachment urls are signed, so
+// a wildcard is fine
+const CorsHosts = new Set([
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+]);
+
+const injectCorsHeader = (url: string, headers: PolicyMap) => {
+    if (!CorsHosts.has(new URL(url).host)) return;
+
+    const existing = findHeader(headers, "access-control-allow-origin");
+    if (existing) delete headers[existing];
+    headers["access-control-allow-origin"] = ["*"];
+};
+
 export function initCsp() {
-    session.defaultSession.webRequest.onHeadersReceived(({ responseHeaders, resourceType }, cb) => {
+    session.defaultSession.webRequest.onHeadersReceived(({ responseHeaders, resourceType, url }, cb) => {
         if (responseHeaders) {
             if (resourceType === "mainFrame")
                 patchCsp(responseHeaders);
+
+            if (resourceType === "xhr")
+                injectCorsHeader(url, responseHeaders);
 
             // Fix hosts that don't properly set the css content type, such as
             // raw.githubusercontent.com

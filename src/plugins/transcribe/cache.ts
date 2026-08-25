@@ -16,16 +16,17 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import { type AutomaticSpeechRecognitionPipeline,pipeline } from "@huggingface/transformers";
-import { PluginNative } from "@utils/types";
+import { type AutomaticSpeechRecognitionPipeline, pipeline, WhisperTextStreamer, type WhisperTokenizer } from "@huggingface/transformers";
 
 import type { Segment } from "./TranscriptionAccesory";
-
-const Native = VencordNative.pluginHelpers.Transcriber as PluginNative<typeof import("./native")>;
 
 const MODEL = "onnx-community/whisper-small";
 // whisper models expect 16kHz mono pcm
 const SAMPLE_RATE = 16000;
+// whisper only sees 30s at a time; chunk with overlap so longer
+// voice messages get transcribed in full
+const CHUNK_LENGTH_S = 30;
+const STRIDE_LENGTH_S = 5;
 
 // attachmentId -> transcription, kept in memory for instant sync access
 const cache = new Map<string, Segment[]>();
@@ -34,7 +35,17 @@ const cache = new Map<string, Segment[]>();
 // instead of queueing duplicate transcriptions
 const inFlight = new Map<string, Promise<Segment[]>>();
 
-// the model is ~250MB of weights, so it is only loaded on the first voice
+// streaming partial results for in-flight transcriptions, so segments show
+// up as they are decoded instead of all at once when done
+const partials = new Map<string, Segment[]>();
+const partialListeners = new Map<string, Set<(segments: Segment[]) => void>>();
+
+function emitPartial(attachmentId: string, segments: Segment[]) {
+    partials.set(attachmentId, segments);
+    for (const listener of partialListeners.get(attachmentId) ?? []) listener(segments);
+}
+
+// the model is ~400MB of weights, so it is only loaded on the first voice
 // message and then kept around. weights are cached by the browser after the
 // first download
 let transcriberPromise: Promise<AutomaticSpeechRecognitionPipeline> | null = null;
@@ -59,10 +70,12 @@ function getTranscriber(): Promise<AutomaticSpeechRecognitionPipeline> {
     return transcriberPromise;
 }
 
-// the audio has to be fetched by the main process (no CORS headers on the
-// discord cdn) and decoded here, since transformers.js can't fetch it itself
+// the discord cdn doesn't send CORS headers; our csp patcher injects them
+// (see src/main/csp) so this fetch works from the renderer
 async function getAudio(url: string): Promise<Float32Array> {
-    const buf = await Native.fetchAudio(url);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`bad status ${res.status}`);
+    const buf = await res.arrayBuffer();
 
     const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
     try {
@@ -79,14 +92,48 @@ async function getAudio(url: string): Promise<Float32Array> {
     }
 }
 
-async function fetchTranscription(url: string): Promise<Segment[]> {
+async function fetchTranscription(attachmentId: string, url: string): Promise<Segment[]> {
     const [transcriber, audio] = await Promise.all([getTranscriber(), getAudio(url)]);
+
+    // streams whisper's timestamped segments as they are decoded. window
+    // offsets are approximate for audio longer than one chunk (overlapping
+    // windows aren't merged until the end); the final pipeline output below
+    // replaces these with exact timestamps
+    const streamed: Segment[] = [];
+    let current: Segment | null = null;
+    let windowIndex = 0;
+    const windowOffset = () => (CHUNK_LENGTH_S - STRIDE_LENGTH_S) * windowIndex;
+
+    const timePrecision = (transcriber.processor.feature_extractor as any).config.chunk_length /
+        (transcriber.model.config as any).max_source_positions;
+
+    const streamer = new WhisperTextStreamer(transcriber.tokenizer as WhisperTokenizer, {
+        time_precision: timePrecision,
+        on_chunk_start: start => {
+            current = { text: "", start: windowOffset() + start, end: Infinity };
+            streamed.push(current);
+        },
+        callback_function: text => {
+            if (!current) return;
+            current.text += text;
+            emitPartial(attachmentId, [...streamed]);
+        },
+        on_chunk_end: end => {
+            if (current) current.end = windowOffset() + end;
+            current = null;
+            emitPartial(attachmentId, [...streamed]);
+        },
+        on_finalize: () => {
+            current = null;
+            windowIndex++;
+        },
+    });
+
     const output = await transcriber(audio, {
-        // whisper only sees 30s at a time; chunk with overlap so longer
-        // voice messages get transcribed in full
-        chunk_length_s: 30,
-        stride_length_s: 5,
+        chunk_length_s: CHUNK_LENGTH_S,
+        stride_length_s: STRIDE_LENGTH_S,
         return_timestamps: true,
+        streamer,
     });
 
     const { chunks } = Array.isArray(output) ? output[0] : output;
@@ -100,23 +147,43 @@ async function fetchTranscription(url: string): Promise<Segment[]> {
     }));
 }
 
-export function getTranscription(attachmentId: string, url: string): Promise<Segment[]> {
+export function getTranscription(
+    attachmentId: string,
+    url: string,
+    onPartial?: (segments: Segment[]) => void,
+): { promise: Promise<Segment[]>; unsubscribe(): void; } {
+    let unsubscribe = () => { };
+    if (onPartial) {
+        let listeners = partialListeners.get(attachmentId);
+        if (!listeners) partialListeners.set(attachmentId, listeners = new Set());
+        listeners.add(onPartial);
+        unsubscribe = () => {
+            listeners.delete(onPartial);
+            if (!listeners.size) partialListeners.delete(attachmentId);
+        };
+
+        // joining an in-flight transcription: catch up on what's streamed so far
+        const partial = partials.get(attachmentId);
+        if (partial) onPartial(partial);
+    }
+
     const cached = cache.get(attachmentId);
-    if (cached) return Promise.resolve(cached);
+    if (cached) return { promise: Promise.resolve(cached), unsubscribe };
 
     const pending = inFlight.get(attachmentId);
-    if (pending) return pending;
+    if (pending) return { promise: pending, unsubscribe };
 
     const promise = (async () => {
         try {
-            const segments = await fetchTranscription(url);
+            const segments = await fetchTranscription(attachmentId, url);
             cache.set(attachmentId, segments);
             return segments;
         } finally {
             inFlight.delete(attachmentId);
+            partials.delete(attachmentId);
         }
     })();
 
     inFlight.set(attachmentId, promise);
-    return promise;
+    return { promise, unsubscribe };
 }

@@ -16,11 +16,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import { classNameFactory } from '@api/Styles';
+import { classNameFactory } from "@api/Styles";
 import { Message } from "@vencord/discord-types";
 import { MessageFlags } from "@vencord/discord-types/enums";
 import { useEffect, useRef, useState } from "@webpack/common";
-import { getTranscription } from './cache';
+
+import { getTranscription } from "./cache";
 
 export interface Segment {
   text: string;
@@ -44,12 +45,12 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
 
     const audioElement = sourceElement.parentElement as HTMLAudioElement;
     audioElement.ontimeupdate = () => {
-      const currentTime = audioElement.currentTime;
+      const { currentTime } = audioElement;
       const segmentIndex = segments.findIndex(segment => segment.start <= currentTime && segment.end > currentTime);
       if (segmentIndex !== activeSegment) {
         // console.log('setting active segment', segmentIndex);
         setActiveSegment(segmentIndex);
-      };
+      }
     };
   }, [segments]);
 
@@ -57,7 +58,11 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
     const { id, url } = message.attachments[0];
     let cancelled = false;
 
-    getTranscription(id, url)
+    const { promise, unsubscribe } = getTranscription(id, url, partial => {
+      if (!cancelled) setSegments(partial);
+    });
+
+    promise
       .then(segments => {
         if (!cancelled) setSegments(segments);
       })
@@ -67,6 +72,7 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
 
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [message.attachments[0].id]);
 
@@ -82,9 +88,9 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
 
   return (
     <div className={cl("accessory")}>
-      <div ref={transcriptionElement} className={cl("transcription", expanded && 'expanded')}>
+      <div ref={transcriptionElement} className={cl("transcription", expanded && "expanded")}>
         {error ?? (segments ? segments.map((segment, i) => (
-          <div key={i} className={cl("segment", activeSegment === i && 'active')} onClick={(ev) => {
+          <div key={i} className={cl("segment", activeSegment === i && "active")} onClick={ev => {
             console.log(segment.start, i);
             const sourceElement = document.querySelector<HTMLSourceElement>(`audio > source[src="${message.attachments[0].url}"]`);
             if (!sourceElement || !segments) return;
@@ -95,9 +101,9 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
           }}>
             {segment.text}
           </div >
-        )) : 'Transcribing...')}
+        )) : "Transcribing...")}
       </div>
-      {clamped && <a onClick={() => setExpanded(!expanded)}>Read {expanded ? 'Less' : "More"}</a>}
+      {clamped && <a onClick={() => setExpanded(!expanded)}>Read {expanded ? "Less" : "More"}</a>}
     </div>
   );
-};
+}
