@@ -1,0 +1,41 @@
+.vc-e2ee-chat-icon {
+    scale: 1.1;
+    color: var(--interactive-normal);
+}
+
+.vc-e2ee-chat-icon-unavailable {
+    opacity: 0.55;
+}
+
+.vc-e2ee-chat-icon-on {
+    color: var(--status-positive, var(--green-360));
+}
+
+.vc-e2ee-chat-icon-off {
+    color: var(--status-warning, var(--yellow-360));
+}
+
+.vc-e2ee-decoration {
+    display: inline-flex;
+    align-items: center;
+    vertical-align: top;
+    margin-left: 4px;
+    color: var(--status-positive, var(--green-360));
+}
+
+.vc-e2ee-decoration-no-key,
+.vc-e2ee-decoration-failed {
+    color: var(--status-danger, var(--red-400));
+}
+
+.vc-e2ee-fp {
+    font-family: var(--font-code);
+    user-select: all;
+}
+
+.vc-e2ee-fp-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35em;
+    color: var(--text-default, var(--text-normal));
+}
