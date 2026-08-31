@@ -8,6 +8,7 @@ import "./styles.css";
 
 import { ChatBarButton, ChatBarButtonFactory } from "@api/ChatButtons";
 import { updateMessage } from "@api/MessageUpdater";
+import { isPluginEnabled } from "@api/PluginManager";
 import { definePluginSettings } from "@api/Settings";
 import { classNameFactory } from "@api/Styles";
 import { Button } from "@components/Button";
@@ -22,6 +23,20 @@ import { Alerts, ChannelStore, ContextMenuApi, Menu, MessageStore, SelectedChann
 import * as e2ee from "./crypto";
 
 const cl = classNameFactory("vc-e2ee-");
+
+const dbg = (...args: unknown[]) => e2ee.logger.info("[dbg]", ...args);
+
+/** Full status detail for logs: why is/isn't this channel considered established? */
+function describeStatus(channelId: string) {
+    const status = getStatus(ChannelStore.getChannel(channelId));
+    return {
+        channelId,
+        ...status,
+        announcedStored: e2ee.getAnnouncedRaw(channelId) ?? null,
+        announcedExpected: e2ee.announcementKey(status.recipients),
+        prefEnabled: e2ee.isChannelEncryptionEnabled(channelId),
+    };
+}
 
 // ---------- settings ----------
 
@@ -148,6 +163,7 @@ function userName(id: string) {
 async function announce(channel: Channel) {
     await e2ee.init();
     const recipients = getRecipients(channel);
+    dbg("announcing our public key", { channelId: channel.id, recipients });
     await e2ee.markAnnounced(channel.id, recipients);
     notify();
     try {
@@ -193,8 +209,14 @@ async function processMessage(raw: RawMessage) {
     if (!content) return;
     if (!ChannelStore.getChannel(raw.channel_id)?.isPrivate?.()) return;
 
-    if (e2ee.isBeacon(content)) return handleBeacon(raw, content);
-    if (e2ee.isCiphertext(content)) return handleCiphertext(raw, content);
+    if (e2ee.isBeacon(content)) {
+        dbg("processing beacon message", { id: raw.id, channelId: raw.channel_id, author: raw.author?.id });
+        return handleBeacon(raw, content);
+    }
+    if (e2ee.isCiphertext(content)) {
+        dbg("processing ciphertext message", { id: raw.id, channelId: raw.channel_id, author: raw.author?.id });
+        return handleCiphertext(raw, content);
+    }
 }
 
 async function handleBeacon(raw: RawMessage, content: string) {
@@ -214,7 +236,8 @@ async function handleBeacon(raw: RawMessage, content: string) {
     }
 
     const peer = await e2ee.learnPeerKey(authorId, content);
-    if (!peer) return;
+    if (!peer) return dbg("beacon was invalid, ignored", { id: raw.id, author: authorId });
+    dbg("learned peer public key", { author: authorId, fp: peer.fp });
     notify();
 
     const display = `\u{1F510} ${userName(authorId)} shared their E2EE public key · \`${e2ee.formatFingerprint(peer.fp)}\``;
@@ -230,7 +253,9 @@ async function handleBeacon(raw: RawMessage, content: string) {
 
     const channel = ChannelStore.getChannel(raw.channel_id);
     if (!channel) return;
-    if (settings.store.autoReply && !e2ee.hasAnnounced(channel.id, getRecipients(channel))) {
+    const shouldReply = settings.store.autoReply && !e2ee.hasAnnounced(channel.id, getRecipients(channel));
+    dbg("beacon handled", { autoReply: settings.store.autoReply, alreadyAnnounced: e2ee.hasAnnounced(channel.id, getRecipients(channel)), replying: shouldReply });
+    if (shouldReply) {
         await announce(channel);
     }
 }
@@ -241,12 +266,14 @@ async function handleCiphertext(raw: RawMessage, content: string) {
 
     try {
         const plain = await e2ee.decrypt(content);
+        dbg("decrypted message", { id: raw.id });
         messageStates.set(raw.id, "encrypted");
         undecryptable.delete(raw.id);
         handled.set(raw.id, { cipher: content, display: plain });
         updateMessage(raw.channel_id, raw.id, { content: plain });
     } catch (err) {
         const reason = err instanceof e2ee.DecryptError ? err.reason : "failed";
+        dbg("decrypt failed", { id: raw.id, reason, err });
         if (reason === "malformed") {
             // Doesn't look like ours after all; leave the message alone
             messageStates.delete(raw.id);
@@ -279,6 +306,7 @@ async function encryptOutgoing(channelId: string, content: string): Promise<stri
     const status = getStatus(channel);
     try {
         const encrypted = await e2ee.encrypt(content, status.recipients);
+        dbg("encrypted outgoing message", { channelId, plainLen: content.length, cipherLen: encrypted.length, recipients: status.recipients });
         if (encrypted.length > maxMessageLength()) {
             showToast(`Message too long to send encrypted (${encrypted.length}/${maxMessageLength()} characters after encryption)`, Toasts.Type.FAILURE);
             return null;
@@ -412,6 +440,7 @@ export default definePlugin({
     description: "End-to-end encrypt DMs and group DMs with other Vencord users who have this plugin. Exchange public keys once, then everything you type is encrypted before it leaves your client.",
     authors: [Devs.Commandtechno],
     tags: ["Chat", "Privacy"],
+    dependencies: ["ChatInputButtonAPI", "MessageDecorationsAPI", "MessageEventsAPI", "MessageUpdaterAPI"],
     settings,
 
     chatBarButton: {
@@ -421,6 +450,19 @@ export default definePlugin({
 
     async start() {
         await e2ee.init();
+
+        const apiStatus = {
+            MessageEventsAPI: isPluginEnabled("MessageEventsAPI"),
+            MessageUpdaterAPI: isPluginEnabled("MessageUpdaterAPI"),
+            ChatInputButtonAPI: isPluginEnabled("ChatInputButtonAPI"),
+            MessageDecorationsAPI: isPluginEnabled("MessageDecorationsAPI"),
+        };
+        dbg("started", { apiStatus, ...e2ee.debugSnapshot() });
+        if (!apiStatus.MessageEventsAPI) {
+            e2ee.logger.error("MessageEventsAPI is not enabled — outgoing messages will NOT be intercepted or encrypted! Fully restart Discord.");
+            showToast("E2EE: message send hook is not active — fully restart Discord!", Toasts.Type.FAILURE);
+        }
+
         const channelId = SelectedChannelStore.getChannelId();
         if (channelId) scanChannel(channelId);
     },
@@ -459,12 +501,14 @@ export default definePlugin({
     },
 
     async onBeforeMessageSend(channelId, message) {
+        dbg("onBeforeMessageSend fired", { channelId, contentLen: message.content?.length ?? 0 });
         if (!message.content) return;
-        if (e2ee.isBeacon(message.content) || e2ee.isCiphertext(message.content)) return;
+        if (e2ee.isBeacon(message.content) || e2ee.isCiphertext(message.content)) return dbg("send: skipping, content is already a beacon/ciphertext");
         await e2ee.init();
 
-        const status = getStatus(ChannelStore.getChannel(channelId));
-        if (!status.enabled) return;
+        const status = describeStatus(channelId);
+        dbg("send: channel status", status);
+        if (!status.enabled) return dbg("send: not encrypting", status.established ? "encryption toggled off for this channel" : "E2EE not established in this channel");
 
         const encrypted = await encryptOutgoing(channelId, message.content);
         if (encrypted === null) return { cancel: true };
@@ -472,6 +516,7 @@ export default definePlugin({
     },
 
     async onBeforeMessageEdit(channelId, messageId, message) {
+        dbg("onBeforeMessageEdit fired", { channelId, messageId, contentLen: message.content?.length ?? 0 });
         if (!message.content) return;
         if (e2ee.isBeacon(message.content) || e2ee.isCiphertext(message.content)) return;
         await e2ee.init();

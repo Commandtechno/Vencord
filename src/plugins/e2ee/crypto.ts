@@ -215,6 +215,22 @@ export function getCurrentFingerprint() {
     return currentFp;
 }
 
+/** Raw announced marker stored for a channel (debugging) */
+export function getAnnouncedRaw(channelId: string) {
+    return announced[channelId];
+}
+
+/** JSON-safe dump of all E2EE state (debugging) */
+export function debugSnapshot() {
+    return {
+        currentFp,
+        identityFps: [...identities.keys()],
+        peers: [...peersByTag.values()].map(p => ({ userId: p.userId, fp: p.fp, seenAt: new Date(p.seenAt).toISOString() })),
+        announced: { ...announced },
+        channelPrefs: { ...channelPrefs },
+    };
+}
+
 export function getCurrentPublicKeyBase64() {
     return toBase64(identities.get(currentFp)!.publicRaw);
 }
