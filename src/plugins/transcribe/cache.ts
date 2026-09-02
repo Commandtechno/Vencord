@@ -16,9 +16,49 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import { type AutomaticSpeechRecognitionPipeline, pipeline, WhisperTextStreamer, type WhisperTokenizer } from "@huggingface/transformers";
+import { type AutomaticSpeechRecognitionPipeline, pipeline, type ProgressInfo, WhisperTextStreamer, type WhisperTokenizer } from "@huggingface/transformers";
 
 import type { Segment } from "./TranscriptionAccesory";
+
+function log(...args: unknown[]) {
+    console.debug(`[Transcriber ${new Date().toISOString()}]`, ...args);
+}
+
+// logs initiate/done/ready immediately, and download progress at most once per
+// 10% per file, so we can tell which stage (and which file) it's stuck on
+// without flooding the console
+function makeProgressLogger(label: string): (info: ProgressInfo) => void {
+    const lastLoggedDecile = new Map<string, number>();
+    return info => {
+        switch (info.status) {
+            case "initiate":
+                log(`${label}: fetching ${info.file}`);
+                break;
+            case "done":
+                log(`${label}: done ${info.file}`);
+                break;
+            case "ready":
+                log(`${label}: ready (task=${info.task}, model=${info.model})`);
+                break;
+            case "progress": {
+                const decile = Math.floor(info.progress / 10);
+                if (lastLoggedDecile.get(info.file) !== decile) {
+                    lastLoggedDecile.set(info.file, decile);
+                    log(`${label}: ${info.file} ${info.progress.toFixed(0)}% (${info.loaded}/${info.total} bytes)`);
+                }
+                break;
+            }
+        }
+    };
+}
+
+// logs a heartbeat while a stage is pending, so a genuine hang (as opposed to
+// a slow-but-progressing download) is visible even with no other output
+function withHeartbeat<T>(label: string, promise: Promise<T>): Promise<T> {
+    const start = Date.now();
+    const interval = setInterval(() => log(`${label}: still waiting (${((Date.now() - start) / 1000).toFixed(0)}s elapsed)`), 10_000);
+    return promise.finally(() => clearInterval(interval));
+}
 
 const MODEL = "onnx-community/whisper-small";
 // whisper models expect 16kHz mono pcm
@@ -52,37 +92,48 @@ let transcriberPromise: Promise<AutomaticSpeechRecognitionPipeline> | null = nul
 
 function getTranscriber(): Promise<AutomaticSpeechRecognitionPipeline> {
     transcriberPromise ??= (async () => {
+        log("starting webgpu pipeline load");
         try {
-            return await pipeline("automatic-speech-recognition", MODEL, {
+            const result = await withHeartbeat("webgpu pipeline load", pipeline("automatic-speech-recognition", MODEL, {
                 device: "webgpu",
-                // q4 (MatMulNBits) decoder_model_merged is broken for this repo: onnxruntime-web
-                // fails to create a session because the tied embed_tokens/lm_head weight is
-                // missing its dequantization scale. fp16 avoids that quantization path entirely
-                dtype: { encoder_model: "fp16", decoder_model_merged: "fp16" },
-            });
+                dtype: { encoder_model: "fp16", decoder_model_merged: "q4" },
+                progress_callback: makeProgressLogger("webgpu"),
+            }));
+            log("webgpu pipeline load succeeded");
+            return result;
         } catch (err) {
             console.warn("[Transcriber] WebGPU unavailable, falling back to WASM", err);
-            return await pipeline("automatic-speech-recognition", MODEL, {
+            log("starting wasm pipeline load");
+            const result = await withHeartbeat("wasm pipeline load", pipeline("automatic-speech-recognition", MODEL, {
                 device: "wasm",
                 dtype: "q8",
-            });
+                progress_callback: makeProgressLogger("wasm"),
+            }));
+            log("wasm pipeline load succeeded");
+            return result;
         }
     })();
 
-    transcriberPromise.catch(() => { transcriberPromise = null; });
+    transcriberPromise.catch(err => {
+        log("pipeline load failed", err);
+        transcriberPromise = null;
+    });
     return transcriberPromise;
 }
 
 // the discord cdn doesn't send CORS headers; our csp patcher injects them
 // (see src/main/csp) so this fetch works from the renderer
 async function getAudio(url: string): Promise<Float32Array> {
-    const res = await fetch(url);
+    log("fetching audio", url);
+    const res = await withHeartbeat("audio fetch", fetch(url));
     if (!res.ok) throw new Error(`bad status ${res.status}`);
     const buf = await res.arrayBuffer();
+    log(`audio fetched (${buf.byteLength} bytes), decoding`);
 
     const ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
     try {
         const decoded = await ctx.decodeAudioData(buf);
+        log(`audio decoded (${decoded.duration.toFixed(2)}s, ${decoded.numberOfChannels}ch)`);
         if (decoded.numberOfChannels === 1) return decoded.getChannelData(0);
 
         const left = decoded.getChannelData(0);
@@ -96,7 +147,9 @@ async function getAudio(url: string): Promise<Float32Array> {
 }
 
 async function fetchTranscription(attachmentId: string, url: string): Promise<Segment[]> {
+    log("fetchTranscription start", attachmentId);
     const [transcriber, audio] = await Promise.all([getTranscriber(), getAudio(url)]);
+    log("transcriber ready and audio loaded, starting inference");
 
     // streams whisper's timestamped segments as they are decoded. window
     // offsets are approximate for audio longer than one chunk (overlapping
@@ -113,6 +166,7 @@ async function fetchTranscription(attachmentId: string, url: string): Promise<Se
     const streamer = new WhisperTextStreamer(transcriber.tokenizer as WhisperTokenizer, {
         time_precision: timePrecision,
         on_chunk_start: start => {
+            log(`inference: chunk ${windowIndex} started at ${start}`);
             current = { text: "", start: windowOffset() + start, end: Infinity };
             streamed.push(current);
         },
@@ -132,12 +186,13 @@ async function fetchTranscription(attachmentId: string, url: string): Promise<Se
         },
     });
 
-    const output = await transcriber(audio, {
+    const output = await withHeartbeat("inference", transcriber(audio, {
         chunk_length_s: CHUNK_LENGTH_S,
         stride_length_s: STRIDE_LENGTH_S,
         return_timestamps: true,
         streamer,
-    });
+    }));
+    log("inference done");
 
     const { chunks } = Array.isArray(output) ? output[0] : output;
     if (!chunks) throw new Error("transcribe failed: no chunks returned");

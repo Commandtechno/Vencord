@@ -43,3 +43,45 @@
     gap: 0.35em;
     color: var(--text-default, var(--text-normal));
 }
+
+.vc-e2ee-attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 4px;
+}
+
+.vc-e2ee-attachment-loading,
+.vc-e2ee-attachment-error,
+.vc-e2ee-attachment-file {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: var(--background-secondary);
+    color: var(--text-muted);
+    width: fit-content;
+}
+
+.vc-e2ee-attachment-error {
+    color: var(--status-danger, var(--red-400));
+}
+
+.vc-e2ee-attachment-file {
+    color: var(--text-link, var(--text-normal));
+    text-decoration: none;
+}
+
+.vc-e2ee-attachment-file:hover {
+    background: var(--background-secondary-alt, var(--background-secondary));
+}
+
+.vc-e2ee-attachment-image,
+.vc-e2ee-attachment-video,
+.vc-e2ee-attachment-audio {
+    max-width: 400px;
+    max-height: 300px;
+    border-radius: 4px;
+    display: block;
+}

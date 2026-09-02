@@ -17,13 +17,28 @@ import { Paragraph } from "@components/Paragraph";
 import { Devs } from "@utils/constants";
 import { sendMessage } from "@utils/discord";
 import definePlugin, { IconComponent, OptionType } from "@utils/types";
-import { Channel } from "@vencord/discord-types";
+import { Channel, CloudUpload as TCloudUpload } from "@vencord/discord-types";
 import { ChannelType } from "@vencord/discord-types/enums";
-import { Alerts, ChannelStore, ContextMenuApi, Menu, MessageStore, SelectedChannelStore, showToast, Toasts, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
+import { findByCodeLazy, findLazy, findStoreLazy } from "@webpack";
+import { Alerts, ChannelStore, ContextMenuApi, FluxDispatcher, Menu, MessageStore, SelectedChannelStore, showToast, Toasts, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
 
 import * as e2ee from "./crypto";
 
 const cl = classNameFactory("vc-e2ee-");
+
+/**
+ * The real CloudUpload class, found the same way VoiceMessages finds it. We need this (rather than
+ * just the type) so we can wrap its `upload` method directly — Discord starts uploading a file the
+ * moment it's attached to the compose box, well before Send is pressed, so a patch on the later
+ * send-time `uploadFiles(` batch call is too late: the plaintext may already be on Discord's CDN.
+ */
+const CloudUpload: typeof TCloudUpload = findLazy(m => m.prototype?.trackUploadFinished);
+
+/** Backs the little "replying to: ..." preview line. Same lookup ValidReply uses. */
+const ReferencedMessageStore: any = findStoreLazy("ReferencedMessageStore");
+const createMessageRecord = findByCodeLazy(".createFromServer(", ".isBlockedForMessage", "messageReference:");
+/** Matches ReferencedMessageStore's internal enum ordering (Loaded = 0). */
+const REFERENCED_MESSAGE_LOADED = 0;
 
 /** Guild channel types where sending/reading normal messages makes sense. Threads included, voice/forum/category excluded. */
 const GUILD_TEXTUAL_TYPES = new Set([
@@ -181,6 +196,10 @@ function getStatus(channel: Channel | undefined | null): ChannelStatus {
     const missing = recipients.filter(id => !e2ee.hasPeerKey(id));
     const announced = e2ee.hasAnnounced(channel.id, announceRecipients(channel));
     const established = isDM && recipients.length > 0 && missing.length === 0 && announced;
+    // Fully established DMs default to on (the original "exchange once, then it just works" behavior).
+    // Anything short of that (partial/guild) must be explicitly toggled — merely already knowing a
+    // recipient's key from some other channel/conversation must never silently turn encryption on here.
+    const encryptionPref = established ? e2ee.isChannelEncryptionEnabled(channel.id) : e2ee.isChannelEncryptionExplicitlyEnabled(channel.id);
     return {
         supported: true,
         recipients,
@@ -188,7 +207,10 @@ function getStatus(channel: Channel | undefined | null): ChannelStatus {
         missing,
         announced,
         established,
-        enabled: known.length > 0 && e2ee.isChannelEncryptionEnabled(channel.id),
+        // Require `announced` too (not just the persisted pref): if the identity key gets regenerated,
+        // `announced` resets for every channel, so a stale "on" preference can't silently encrypt with
+        // a key the recipient never received.
+        enabled: announced && known.length > 0 && encryptionPref,
     };
 }
 
@@ -213,11 +235,22 @@ async function announce(channel: Channel) {
 
 // ---------- message processing ----------
 
+interface RawAttachment {
+    id: string;
+    filename: string;
+    url: string;
+    proxy_url?: string;
+    size?: number;
+}
+
 interface RawMessage {
     id: string;
     channel_id: string;
     content?: string;
     author?: { id: string; };
+    attachments?: RawAttachment[];
+    /** Full snapshot of the message this one replies to, embedded by Discord when the reply is sent/loaded. */
+    referenced_message?: RawMessage | null;
 }
 
 type MessageState = "encrypted" | "no-key" | "failed" | "beacon";
@@ -241,11 +274,48 @@ function decryptedPlaceholder(reason: e2ee.DecryptError["reason"]) {
         : "\u{1F512} *Encrypted message — could not be decrypted*";
 }
 
+/**
+ * The "replying to: ..." preview line reads from a separate ReferencedMessageStore cache, populated
+ * from the full message snapshot Discord embeds as `referenced_message` — it's not the same object
+ * as the live entry in the channel's MessageStore, so decrypting that live entry doesn't fix this
+ * preview on its own. This mirrors the fix-up recipe from the ValidReply plugin.
+ */
+const decryptedReferences = new Map<string, string>();
+
+async function decryptReferencedMessage(ref: RawMessage) {
+    const { content } = ref;
+    if (!content || !e2ee.isCiphertext(content)) return;
+    if (decryptedReferences.get(ref.id) === content) return; // already handled this exact ciphertext
+
+    await e2ee.init();
+    let display: string;
+    try {
+        display = await e2ee.decrypt(content);
+    } catch (err) {
+        const reason = err instanceof e2ee.DecryptError ? err.reason : "failed";
+        if (reason === "malformed") return;
+        display = decryptedPlaceholder(reason);
+    }
+
+    decryptedReferences.set(ref.id, content);
+    const updated = { ...ref, content: display };
+    dbg("decrypted reply preview", { id: ref.id, channelId: ref.channel_id });
+    ReferencedMessageStore.set(ref.channel_id, ref.id, { state: REFERENCED_MESSAGE_LOADED, message: createMessageRecord(updated) });
+    FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message: updated });
+}
+
 async function processMessage(raw: RawMessage) {
-    const { content } = raw;
-    if (!content) return;
     const channel = ChannelStore.getChannel(raw.channel_id);
     if (!channel?.isPrivate?.() && !isGuildTextChannel(channel)) return;
+
+    if (raw.referenced_message) decryptReferencedMessage(raw.referenced_message);
+
+    if (raw.attachments?.some(a => e2ee.isEncryptedAttachmentFilename(a.filename))) {
+        messageStates.set(raw.id, messageStates.get(raw.id) ?? "encrypted");
+    }
+
+    const { content } = raw;
+    if (!content) return;
 
     if (e2ee.isBeacon(content)) {
         dbg("processing beacon message", { id: raw.id, channelId: raw.channel_id, author: raw.author?.id });
@@ -335,8 +405,8 @@ function scanChannel(channelId: string) {
     const messages = MessageStore.getMessages(channelId);
     if (!messages) return;
     messages.forEach(m => {
-        if (e2ee.isBeacon(m.content) || e2ee.isCiphertext(m.content)) {
-            processMessage({ id: m.id, channel_id: m.channel_id, content: m.content, author: m.author });
+        if (e2ee.isBeacon(m.content) || e2ee.isCiphertext(m.content) || m.attachments?.some((a: RawAttachment) => e2ee.isEncryptedAttachmentFilename(a.filename))) {
+            processMessage({ id: m.id, channel_id: m.channel_id, content: m.content, author: m.author, attachments: m.attachments });
         }
     });
 }
@@ -367,6 +437,150 @@ async function encryptOutgoing(channelId: string, content: string): Promise<stri
         showToast("Failed to encrypt message — not sent", Toasts.Type.FAILURE);
         return null;
     }
+}
+
+// ---------- attachments ----------
+
+async function encryptUpload(upload: TCloudUpload) {
+    await e2ee.init();
+    // Only the desktop/web upload path carries a real File we can get bytes from.
+    const file = upload.item?.file;
+    if (!file) return dbg("attachment: skipping non-web upload", { channelId: upload.channelId, filename: upload.filename });
+    if (e2ee.isEncryptedAttachmentFilename(upload.filename)) return; // already encrypted (e.g. a retried upload)
+
+    const status = getStatus(ChannelStore.getChannel(upload.channelId));
+    if (!status.enabled) return dbg("attachment: not encrypting", { channelId: upload.channelId, filename: upload.filename });
+
+    const plainBytes = new Uint8Array(await file.arrayBuffer());
+    const cipherBytes = await e2ee.encryptBytes(plainBytes, status.known);
+    const newFilename = upload.filename + e2ee.ATTACHMENT_MARKER;
+
+    upload.item.file = new File([cipherBytes], newFilename, { type: "application/octet-stream" });
+    upload.filename = newFilename;
+    upload.uploadedFilename = newFilename;
+    upload.mimeType = "application/octet-stream";
+    upload.isImage = false;
+    upload.isVideo = false;
+    upload.currentSize = cipherBytes.length;
+    upload.preCompressionSize = cipherBytes.length;
+
+    dbg("encrypted attachment", { channelId: upload.channelId, filename: newFilename, plainSize: plainBytes.length, cipherSize: cipherBytes.length, recipients: status.known });
+}
+
+/**
+ * Wraps CloudUpload.prototype.upload so every upload — however/whenever it's triggered, including
+ * Discord's eager "start uploading as soon as it's attached" behavior — gets encrypted (if the
+ * channel has E2EE on) before any bytes actually leave the client. Restored in stop().
+ */
+let origCloudUploadUpload: typeof CloudUpload.prototype.upload | null = null;
+
+function patchCloudUpload() {
+    origCloudUploadUpload = CloudUpload.prototype.upload;
+    CloudUpload.prototype.upload = function (this: TCloudUpload) {
+        return encryptUpload(this)
+            .catch(err => {
+                e2ee.logger.error("Failed to encrypt attachment, refusing to upload it unencrypted", err);
+                showToast(`Failed to encrypt "${this.filename}" — not sent`, Toasts.Type.FAILURE);
+                throw err;
+            })
+            .then(() => origCloudUploadUpload!.call(this));
+    };
+}
+
+function unpatchCloudUpload() {
+    if (origCloudUploadUpload) CloudUpload.prototype.upload = origCloudUploadUpload;
+    origCloudUploadUpload = null;
+}
+
+function shouldHideAttachments(msg: any): boolean {
+    const attachments: RawAttachment[] | undefined = msg?.attachments
+        ?? (msg?.id && msg?.channel_id ? MessageStore.getMessage(msg.channel_id, msg.id)?.attachments : undefined);
+    return !!attachments?.some(a => e2ee.isEncryptedAttachmentFilename(a.filename));
+}
+
+/** Decrypted attachments are cached by attachment ID so scrolling messages back into view doesn't refetch/redecrypt them. Cleared on plugin stop. */
+const decryptedAttachments = new Map<string, { url: string; }>();
+
+function guessAttachmentKind(name: string): "image" | "video" | "audio" | "file" {
+    if (/\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(name)) return "image";
+    if (/\.(mp4|webm|mov|m4v)$/i.test(name)) return "video";
+    if (/\.(mp3|wav|ogg|flac|m4a)$/i.test(name)) return "audio";
+    return "file";
+}
+
+function EncryptedAttachment({ attachment }: { attachment: RawAttachment; }) {
+    const version = useE2EEVersion();
+    const [state, setState] = useState<"loading" | "no-key" | "failed" | { url: string; }>(() => decryptedAttachments.get(attachment.id) ?? "loading");
+    const originalName = e2ee.originalAttachmentFilename(attachment.filename);
+
+    useEffect(() => {
+        const cached = decryptedAttachments.get(attachment.id);
+        if (cached) { setState(cached); return; }
+
+        let cancelled = false;
+        setState("loading");
+        (async () => {
+            await e2ee.init();
+            const res = await fetch(attachment.url);
+            if (!res.ok) throw new Error(`Failed to download attachment: ${res.status}`);
+            const cipherBytes = new Uint8Array(await res.arrayBuffer());
+            const plainBytes = await e2ee.decryptBytes(cipherBytes);
+            const url = URL.createObjectURL(new Blob([plainBytes]));
+            decryptedAttachments.set(attachment.id, { url });
+            if (!cancelled) setState({ url });
+        })().catch(err => {
+            const reason = err instanceof e2ee.DecryptError ? err.reason : "failed";
+            dbg("attachment decrypt failed", { id: attachment.id, reason, err });
+            if (!cancelled) setState(reason === "no-key" ? "no-key" : "failed");
+        });
+        return () => { cancelled = true; };
+    }, [attachment.id, attachment.url, version]);
+
+    if (state === "loading") {
+        return (
+            <div className={cl("attachment", "attachment-loading")}>
+                <LockIcon width={16} height={16} /> Decrypting {originalName}…
+            </div>
+        );
+    }
+    if (state === "no-key" || state === "failed") {
+        return (
+            <div className={cl("attachment", "attachment-error")}>
+                <LockIcon width={16} height={16} />
+                {state === "no-key" ? "Encrypted attachment — you don't have the key to read it" : "Encrypted attachment — could not be decrypted"}
+            </div>
+        );
+    }
+
+    const kind = guessAttachmentKind(originalName);
+    if (kind === "image") {
+        return (
+            <a href={state.url} target="_blank" rel="noreferrer">
+                <img src={state.url} alt={originalName} className={cl("attachment", "attachment-image")} />
+            </a>
+        );
+    }
+    if (kind === "video") {
+        return <video src={state.url} controls className={cl("attachment", "attachment-video")} />;
+    }
+    if (kind === "audio") {
+        return <audio src={state.url} controls className={cl("attachment", "attachment-audio")} />;
+    }
+    return (
+        <a href={state.url} download={originalName} className={cl("attachment", "attachment-file")}>
+            <LockIcon width={16} height={16} /> {originalName}
+        </a>
+    );
+}
+
+function EncryptedAttachments({ message }: { message: { attachments?: RawAttachment[]; }; }) {
+    const encrypted = message.attachments?.filter(a => e2ee.isEncryptedAttachmentFilename(a.filename)) ?? [];
+    if (encrypted.length === 0) return null;
+    return (
+        <div className={cl("attachments")}>
+            {encrypted.map(a => <EncryptedAttachment key={a.id} attachment={a} />)}
+        </div>
+    );
 }
 
 // ---------- UI ----------
@@ -533,10 +747,10 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
 
 export default definePlugin({
     name: "E2EE",
-    description: "End-to-end encrypt DMs, group DMs, and server channels with other Vencord users who have this plugin. Exchange public keys once, then everything you type is encrypted before it leaves your client. Shift-click the lock to encrypt for whoever already has a key without waiting for everyone else — anyone without a key just sees ciphertext.",
+    description: "End-to-end encrypt DMs, group DMs, and server channels with other Vencord users who have this plugin. Exchange public keys once, then everything you type — and any images/files you attach — is encrypted before it leaves your client. Shift-click the lock to encrypt for whoever already has a key without waiting for everyone else — anyone without a key just sees ciphertext/a broken attachment.",
     authors: [Devs.Commandtechno],
     tags: ["Chat", "Privacy"],
-    dependencies: ["ChatInputButtonAPI", "MessageDecorationsAPI", "MessageEventsAPI", "MessageUpdaterAPI"],
+    dependencies: ["ChatInputButtonAPI", "MessageDecorationsAPI", "MessageAccessoriesAPI", "MessageEventsAPI", "MessageUpdaterAPI"],
     settings,
 
     chatBarButton: {
@@ -544,14 +758,30 @@ export default definePlugin({
         render: E2EEChatBarButton,
     },
 
+    patches: [
+        {
+            // Suppresses Discord's normal attachment renderer for messages carrying an encrypted attachment;
+            // renderMessageAccessory (below) renders our decrypted version instead.
+            find: "this.renderAttachments(",
+            replacement: {
+                match: /(?<=\i=)this\.renderAttachments\((\i)\)/,
+                replace: "$self.shouldHideAttachments($1)?null:$&"
+            }
+        },
+    ],
+
+    shouldHideAttachments,
+
     async start() {
         await e2ee.init();
+        patchCloudUpload();
 
         const apiStatus = {
             MessageEventsAPI: isPluginEnabled("MessageEventsAPI"),
             MessageUpdaterAPI: isPluginEnabled("MessageUpdaterAPI"),
             ChatInputButtonAPI: isPluginEnabled("ChatInputButtonAPI"),
             MessageDecorationsAPI: isPluginEnabled("MessageDecorationsAPI"),
+            MessageAccessoriesAPI: isPluginEnabled("MessageAccessoriesAPI"),
         };
         dbg("started", { apiStatus, ...e2ee.debugSnapshot() });
         if (!apiStatus.MessageEventsAPI) {
@@ -564,9 +794,13 @@ export default definePlugin({
     },
 
     stop() {
+        unpatchCloudUpload();
         messageStates.clear();
         handled.clear();
         undecryptable.clear();
+        decryptedReferences.clear();
+        for (const { url } of decryptedAttachments.values()) URL.revokeObjectURL(url);
+        decryptedAttachments.clear();
     },
 
     flux: {
@@ -578,7 +812,7 @@ export default definePlugin({
         },
         MESSAGE_SEND_SUCCESS({ channelId, messageId }: { channelId: string; messageId: string; }) {
             const m = MessageStore.getMessage(channelId, messageId);
-            if (m) processMessage({ id: m.id, channel_id: m.channel_id, content: m.content, author: m.author });
+            if (m) processMessage({ id: m.id, channel_id: m.channel_id, content: m.content, author: m.author, attachments: m.attachments });
         },
         LOAD_MESSAGES_SUCCESS({ messages }: { messages: RawMessage[]; }) {
             for (const m of messages) processMessage(m);
@@ -629,6 +863,11 @@ export default definePlugin({
         const encrypted = await encryptOutgoing(channelId, message.content);
         if (encrypted === null) return { cancel: true };
         message.content = encrypted;
+    },
+
+    renderMessageAccessory({ message }) {
+        if (!shouldHideAttachments(message)) return null;
+        return <EncryptedAttachments message={message} />;
     },
 
     renderMessageDecoration({ message }) {

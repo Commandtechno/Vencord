@@ -1,7 +1,7 @@
 .vc-member-list-decorators-wrapper {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 0.25em;
 }
 

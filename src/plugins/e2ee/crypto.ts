@@ -17,6 +17,22 @@ export const BEACON_PREFIX = "\u{1F510}E2EE1:";
 const CIPHER_RE = /^\u{1F512}([A-Za-z0-9+/]{16,}={0,2})$/u;
 const BEACON_RE = /^\u{1F510}E2EE1:([A-Za-z0-9+/]{80,}={0,2})$/u;
 
+/**
+ * Attachments can't carry a text prefix, so an encrypted file is instead marked by appending this
+ * suffix to its filename. Discord will serve it as an opaque blob (no thumbnail/preview) to
+ * everyone; only clients with this plugin recognize the suffix and know to decrypt it.
+ */
+export const ATTACHMENT_MARKER = ".e2ee";
+
+export function isEncryptedAttachmentFilename(filename: string | undefined) {
+    return !!filename && filename.endsWith(ATTACHMENT_MARKER);
+}
+
+/** Strip the marker to recover the original filename (and its extension, for guessing how to render it). */
+export function originalAttachmentFilename(filename: string) {
+    return isEncryptedAttachmentFilename(filename) ? filename.slice(0, -ATTACHMENT_MARKER.length) : filename;
+}
+
 const VERSION = 1;
 const FP_LEN = 4;
 const WRAPPED_LEN = 40; // AES-KW of a 32 byte key
@@ -317,8 +333,14 @@ export function markAnnounced(channelId: string, recipients: string[]) {
     return DataStore.set(DS_ANNOUNCED, announced);
 }
 
+/** Defaults to ON. Only meaningful once a channel is fully established (DM/group DM) — everyone's key is known, so there's nobody left to surprise. */
 export function isChannelEncryptionEnabled(channelId: string) {
     return channelPrefs[channelId] !== false;
+}
+
+/** Defaults to OFF. Used anywhere encryption isn't fully established (partial/guild), so merely already knowing a recipient's key from some other channel can never silently turn encryption on here — it takes an explicit toggle. */
+export function isChannelEncryptionExplicitlyEnabled(channelId: string) {
+    return channelPrefs[channelId] === true;
 }
 
 export function setChannelEncryptionEnabled(channelId: string, enabled: boolean) {
@@ -362,10 +384,10 @@ async function pairwiseKey(ours: Identity, theirs: Peer) {
 }
 
 /**
- * Encrypt `plaintext` for the given recipients.
+ * Encrypt `plainBytes` for the given recipients. Used for both text messages and file attachments.
  * Layout: [version][senderTag(4)][n][ (recipientTag(4) + wrappedKey(40)) * n ][iv(12)][AES-GCM ciphertext+tag]
  */
-export async function encrypt(plaintext: string, recipientUserIds: string[]) {
+export async function encryptBytes(plainBytes: Uint8Array<ArrayBuffer>, recipientUserIds: string[]): Promise<Uint8Array<ArrayBuffer>> {
     const me = identities.get(currentFp)!;
     const recipients = recipientUserIds.map(id => {
         const p = getPeerKey(id);
@@ -376,7 +398,7 @@ export async function encrypt(plaintext: string, recipientUserIds: string[]) {
 
     const msgKey = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
     const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
-    const body = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, msgKey, new TextEncoder().encode(plaintext)));
+    const body = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, msgKey, plainBytes));
 
     const entries: Uint8Array<ArrayBuffer>[] = [];
     for (const r of recipients) {
@@ -386,7 +408,13 @@ export async function encrypt(plaintext: string, recipientUserIds: string[]) {
     }
 
     const header = new Uint8Array([VERSION, ...me.tag, recipients.length]);
-    return CIPHER_PREFIX + toBase64(concat(header, ...entries, iv, body));
+    return concat(header, ...entries, iv, body);
+}
+
+/** Encrypt `plaintext` for the given recipients, producing a message-ready 🔒-prefixed base64 string. */
+export async function encrypt(plaintext: string, recipientUserIds: string[]) {
+    const encrypted = await encryptBytes(new TextEncoder().encode(plaintext), recipientUserIds);
+    return CIPHER_PREFIX + toBase64(encrypted);
 }
 
 export class DecryptError extends Error {
@@ -395,16 +423,8 @@ export class DecryptError extends Error {
     }
 }
 
-export async function decrypt(content: string): Promise<string> {
-    const m = content.match(CIPHER_RE);
-    if (!m) throw new DecryptError("Not an encrypted message", "malformed");
-
-    let bytes: Uint8Array<ArrayBuffer>;
-    try {
-        bytes = fromBase64(m[1]);
-    } catch {
-        throw new DecryptError("Bad base64", "malformed");
-    }
+/** Decrypt raw bytes produced by {@link encryptBytes}. Used for both text messages and file attachments. */
+export async function decryptBytes(bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
     if (bytes.length < 2 + FP_LEN || bytes[0] !== VERSION) throw new DecryptError("Unsupported version", "malformed");
 
     const senderTag = tagKey(bytes.slice(1, 1 + FP_LEN));
@@ -451,8 +471,23 @@ export async function decrypt(content: string): Promise<string> {
     try {
         const msgKey = await crypto.subtle.unwrapKey("raw", wrapped, wrapKey, "AES-KW", { name: "AES-GCM" }, false, ["decrypt"]);
         const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, msgKey, body);
-        return new TextDecoder().decode(plain);
+        return new Uint8Array(plain);
     } catch (e) {
         throw new DecryptError("Decryption failed", "failed");
     }
+}
+
+/** Decrypt a 🔒-prefixed base64 message produced by {@link encrypt}. */
+export async function decrypt(content: string): Promise<string> {
+    const m = content.match(CIPHER_RE);
+    if (!m) throw new DecryptError("Not an encrypted message", "malformed");
+
+    let bytes: Uint8Array<ArrayBuffer>;
+    try {
+        bytes = fromBase64(m[1]);
+    } catch {
+        throw new DecryptError("Bad base64", "malformed");
+    }
+    const plain = await decryptBytes(bytes);
+    return new TextDecoder().decode(plain);
 }
