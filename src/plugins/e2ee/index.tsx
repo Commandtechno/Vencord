@@ -268,10 +268,14 @@ function reapply(raw: RawMessage, content: string) {
 /** messages we couldn't decrypt, kept so we can retry once we learn a key */
 const undecryptable = new Map<string, RawMessage>();
 
-function decryptedPlaceholder(reason: e2ee.DecryptError["reason"]) {
-    return reason === "no-key"
+function decryptedPlaceholder(reason: e2ee.DecryptError["reason"], content: string) {
+    const base = reason === "no-key"
         ? "\u{1F512} *Encrypted message — you don't have the key to read it*"
         : "\u{1F512} *Encrypted message — could not be decrypted*";
+    // The real mentions are readable in plaintext right on the message (that's what makes
+    // notifications work at all), so we can still show who was pinged even though the text can't be.
+    const mentions = e2ee.trailingMentions(content);
+    return mentions.length ? `${base} (mentions ${mentions.join(" ")})` : base;
 }
 
 /**
@@ -294,7 +298,7 @@ async function decryptReferencedMessage(ref: RawMessage) {
     } catch (err) {
         const reason = err instanceof e2ee.DecryptError ? err.reason : "failed";
         if (reason === "malformed") return;
-        display = decryptedPlaceholder(reason);
+        display = decryptedPlaceholder(reason, content);
     }
 
     decryptedReferences.set(ref.id, content);
@@ -395,7 +399,7 @@ async function handleCiphertext(raw: RawMessage, content: string) {
         }
         messageStates.set(raw.id, reason === "no-key" ? "no-key" : "failed");
         undecryptable.set(raw.id, { ...raw, content });
-        const display = decryptedPlaceholder(reason);
+        const display = decryptedPlaceholder(reason, content);
         handled.set(raw.id, { cipher: content, display });
         updateMessage(raw.channel_id, raw.id, { content: display });
     }

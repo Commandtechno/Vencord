@@ -14,8 +14,33 @@ export const CIPHER_PREFIX = "\u{1F512}";
 /** Message prefix for public key announcements: 🔐E2EE1: + base64(raw P-256 point) */
 export const BEACON_PREFIX = "\u{1F510}E2EE1:";
 
-const CIPHER_RE = /^\u{1F512}([A-Za-z0-9+/]{16,}={0,2})$/u;
+// Not anchored at the end: a real ciphertext message may have plaintext mention tokens appended
+// after it (see MENTION_RE below) so Discord's server still recognizes and notifies for them.
+// Only the base64 payload (group 1) is ever read back out; anything trailing it is ignored here.
+const CIPHER_RE = /^\u{1F512}([A-Za-z0-9+/]{16,}={0,2})/u;
 const BEACON_RE = /^\u{1F510}E2EE1:([A-Za-z0-9+/]{80,}={0,2})$/u;
+
+/** User/role mentions and @everyone/@here, exactly as Discord's own server-side mention parser recognizes them. */
+const MENTION_RE = /<@!?\d+>|<@&\d+>|@everyone|@here/g;
+
+/**
+ * Encrypting a message hides any mention syntax inside it from Discord's server, so nobody gets
+ * pinged/notified — the server never sees anything but a base64 blob. To keep notifications working,
+ * the real mention tokens are re-appended in plaintext after the ciphertext; anyone without this
+ * plugin sees them rendered as a normal mention pill following the unreadable blob. Recipients with
+ * the key never see this trailer since it's discarded once the real content decrypts back out with
+ * the mentions already in their original place.
+ */
+export function extractMentionTokens(text: string): string[] {
+    return [...new Set(text.match(MENTION_RE) ?? [])];
+}
+
+/** The plaintext mention tokens (if any) trailing a ciphertext message, e.g. to show who was pinged even when the message itself can't be decrypted. */
+export function trailingMentions(content: string): string[] {
+    const m = content.match(CIPHER_RE);
+    if (!m) return [];
+    return extractMentionTokens(content.slice(m[0].length));
+}
 
 /**
  * Attachments can't carry a text prefix, so an encrypted file is instead marked by appending this
@@ -414,7 +439,10 @@ export async function encryptBytes(plainBytes: Uint8Array<ArrayBuffer>, recipien
 /** Encrypt `plaintext` for the given recipients, producing a message-ready 🔒-prefixed base64 string. */
 export async function encrypt(plaintext: string, recipientUserIds: string[]) {
     const encrypted = await encryptBytes(new TextEncoder().encode(plaintext), recipientUserIds);
-    return CIPHER_PREFIX + toBase64(encrypted);
+    const cipherText = CIPHER_PREFIX + toBase64(encrypted);
+
+    const mentions = extractMentionTokens(plaintext);
+    return mentions.length ? `${cipherText} ${mentions.join(" ")}` : cipherText;
 }
 
 export class DecryptError extends Error {
