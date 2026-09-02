@@ -18,22 +18,38 @@ import { Devs } from "@utils/constants";
 import { sendMessage } from "@utils/discord";
 import definePlugin, { IconComponent, OptionType } from "@utils/types";
 import { Channel } from "@vencord/discord-types";
+import { ChannelType } from "@vencord/discord-types/enums";
 import { Alerts, ChannelStore, ContextMenuApi, Menu, MessageStore, SelectedChannelStore, showToast, Toasts, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
 
 import * as e2ee from "./crypto";
 
 const cl = classNameFactory("vc-e2ee-");
 
+/** Guild channel types where sending/reading normal messages makes sense. Threads included, voice/forum/category excluded. */
+const GUILD_TEXTUAL_TYPES = new Set([
+    ChannelType.GUILD_TEXT,
+    ChannelType.GUILD_ANNOUNCEMENT,
+    ChannelType.ANNOUNCEMENT_THREAD,
+    ChannelType.PUBLIC_THREAD,
+    ChannelType.PRIVATE_THREAD,
+]);
+
+function isGuildTextChannel(channel: Channel | undefined | null): boolean {
+    if (!channel?.guild_id) return false;
+    return GUILD_TEXTUAL_TYPES.has(channel.type);
+}
+
 const dbg = (...args: unknown[]) => e2ee.logger.info("[dbg]", ...args);
 
 /** Full status detail for logs: why is/isn't this channel considered established? */
 function describeStatus(channelId: string) {
-    const status = getStatus(ChannelStore.getChannel(channelId));
+    const channel = ChannelStore.getChannel(channelId);
+    const status = getStatus(channel);
     return {
         channelId,
         ...status,
         announcedStored: e2ee.getAnnouncedRaw(channelId) ?? null,
-        announcedExpected: e2ee.announcementKey(status.recipients),
+        announcedExpected: channel ? e2ee.announcementKey(announceRecipients(channel)) : null,
         prefEnabled: e2ee.isChannelEncryptionEnabled(channelId),
     };
 }
@@ -123,35 +139,56 @@ function me() {
     return UserStore.getCurrentUser()?.id;
 }
 
+/**
+ * Who this channel's encryption applies to.
+ * DMs/group DMs have a fixed member list. Guild channels don't — anyone could be reading —
+ * so "recipients" there means "whoever has announced a key in this channel so far".
+ */
 function getRecipients(channel: Channel): string[] {
     const self = me();
-    return (channel.recipients ?? []).filter(id => id !== self);
+    if (channel.isPrivate?.()) return (channel.recipients ?? []).filter(id => id !== self);
+    return e2ee.getChannelPeers(channel.id).filter(id => id !== self);
+}
+
+/** The recipient set used to key the "have I announced here" marker. Guild channels use [] since the member list is open-ended: it only tracks whether *our current identity key* has been posted, not who's seen it. */
+function announceRecipients(channel: Channel): string[] {
+    return channel.isPrivate?.() ? getRecipients(channel) : [];
 }
 
 interface ChannelStatus {
     supported: boolean;
+    /** everyone this conversation's encryption is relevant to (DM members, or guild users seen announcing) */
     recipients: string[];
+    /** recipients we can actually encrypt to right now */
+    known: string[];
+    /** recipients we don't have a key for yet */
     missing: string[];
+    /** we've shared our current public key in this channel */
     announced: boolean;
+    /** DMs/group DMs only: every recipient's key is known, so nobody sees gibberish */
     established: boolean;
     enabled: boolean;
 }
 
 function getStatus(channel: Channel | undefined | null): ChannelStatus {
-    if (!channel?.isPrivate?.() || !channel.recipients)
-        return { supported: false, recipients: [], missing: [], announced: false, established: false, enabled: false };
+    const isDM = !!channel?.isPrivate?.() && !!channel.recipients;
+    const isGuild = isGuildTextChannel(channel);
+    if (!channel || (!isDM && !isGuild))
+        return { supported: false, recipients: [], known: [], missing: [], announced: false, established: false, enabled: false };
 
     const recipients = getRecipients(channel);
+    const known = recipients.filter(id => e2ee.hasPeerKey(id));
     const missing = recipients.filter(id => !e2ee.hasPeerKey(id));
-    const announced = e2ee.hasAnnounced(channel.id, recipients);
-    const established = recipients.length > 0 && missing.length === 0 && announced;
+    const announced = e2ee.hasAnnounced(channel.id, announceRecipients(channel));
+    const established = isDM && recipients.length > 0 && missing.length === 0 && announced;
     return {
         supported: true,
         recipients,
+        known,
         missing,
         announced,
         established,
-        enabled: established && e2ee.isChannelEncryptionEnabled(channel.id),
+        enabled: known.length > 0 && e2ee.isChannelEncryptionEnabled(channel.id),
     };
 }
 
@@ -164,7 +201,7 @@ async function announce(channel: Channel) {
     await e2ee.init();
     const recipients = getRecipients(channel);
     dbg("announcing our public key", { channelId: channel.id, recipients });
-    await e2ee.markAnnounced(channel.id, recipients);
+    await e2ee.markAnnounced(channel.id, announceRecipients(channel));
     notify();
     try {
         await sendMessage(channel.id, { content: e2ee.buildBeacon() });
@@ -207,7 +244,8 @@ function decryptedPlaceholder(reason: e2ee.DecryptError["reason"]) {
 async function processMessage(raw: RawMessage) {
     const { content } = raw;
     if (!content) return;
-    if (!ChannelStore.getChannel(raw.channel_id)?.isPrivate?.()) return;
+    const channel = ChannelStore.getChannel(raw.channel_id);
+    if (!channel?.isPrivate?.() && !isGuildTextChannel(channel)) return;
 
     if (e2ee.isBeacon(content)) {
         dbg("processing beacon message", { id: raw.id, channelId: raw.channel_id, author: raw.author?.id });
@@ -238,6 +276,12 @@ async function handleBeacon(raw: RawMessage, content: string) {
     const peer = await e2ee.learnPeerKey(authorId, content);
     if (!peer) return dbg("beacon was invalid, ignored", { id: raw.id, author: authorId });
     dbg("learned peer public key", { author: authorId, fp: peer.fp });
+
+    const channel = ChannelStore.getChannel(raw.channel_id);
+    if (channel && !channel.isPrivate?.()) {
+        // Guild channels have no fixed member list, so we build up "who's here" from beacons we've seen.
+        await e2ee.addChannelPeer(raw.channel_id, authorId);
+    }
     notify();
 
     const display = `\u{1F510} ${userName(authorId)} shared their E2EE public key · \`${e2ee.formatFingerprint(peer.fp)}\``;
@@ -251,10 +295,10 @@ async function handleBeacon(raw: RawMessage, content: string) {
         processMessage(m);
     }
 
-    const channel = ChannelStore.getChannel(raw.channel_id);
     if (!channel) return;
-    const shouldReply = settings.store.autoReply && !e2ee.hasAnnounced(channel.id, getRecipients(channel));
-    dbg("beacon handled", { autoReply: settings.store.autoReply, alreadyAnnounced: e2ee.hasAnnounced(channel.id, getRecipients(channel)), replying: shouldReply });
+    const alreadyAnnounced = e2ee.hasAnnounced(channel.id, announceRecipients(channel));
+    const shouldReply = settings.store.autoReply && !alreadyAnnounced;
+    dbg("beacon handled", { autoReply: settings.store.autoReply, alreadyAnnounced, replying: shouldReply });
     if (shouldReply) {
         await announce(channel);
     }
@@ -304,9 +348,15 @@ function maxMessageLength() {
 async function encryptOutgoing(channelId: string, content: string): Promise<string | null> {
     const channel = ChannelStore.getChannel(channelId);
     const status = getStatus(channel);
+    // Only encrypt to recipients we actually have a key for. Anyone else (missing keys, or
+    // simply anyone else reading a guild channel) will just see the raw ciphertext — that's expected.
+    if (status.known.length === 0) {
+        showToast("No known E2EE keys in this conversation — message not sent", Toasts.Type.FAILURE);
+        return null;
+    }
     try {
-        const encrypted = await e2ee.encrypt(content, status.recipients);
-        dbg("encrypted outgoing message", { channelId, plainLen: content.length, cipherLen: encrypted.length, recipients: status.recipients });
+        const encrypted = await e2ee.encrypt(content, status.known);
+        dbg("encrypted outgoing message", { channelId, plainLen: content.length, cipherLen: encrypted.length, recipients: status.known, totalRecipients: status.recipients.length });
         if (encrypted.length > maxMessageLength()) {
             showToast(`Message too long to send encrypted (${encrypted.length}/${maxMessageLength()} characters after encryption)`, Toasts.Type.FAILURE);
             return null;
@@ -358,19 +408,26 @@ function showFingerprints(channel: Channel, status: ChannelStatus) {
 }
 
 function tooltipFor(status: ChannelStatus) {
-    if (!status.established) {
-        if (status.recipients.length === 0) return "E2EE unavailable: nobody else is in this conversation";
-        if (status.missing.length > 0) {
-            const names = status.missing.map(userName).join(", ");
-            return status.announced
-                ? `E2EE: waiting for ${names} to share a public key`
-                : `E2EE: click to share your public key. Still need a key from ${names}`;
-        }
-        return "E2EE: click to share your public key with this conversation";
+    if (status.enabled) {
+        if (status.established) return "End-to-end encryption ON — click to send unencrypted";
+        const names = status.known.map(userName).join(", ");
+        return `Partial E2EE ON — only ${names} can read this, everyone else sees gibberish. Click to disable`;
     }
-    return status.enabled
-        ? "End-to-end encryption ON — click to send unencrypted"
-        : "End-to-end encryption OFF — click to send encrypted";
+    if (!status.announced) {
+        return status.known.length > 0
+            ? "E2EE: click to share your public key (shift-click to also enable now for known keys)"
+            : "E2EE: click to share your public key with this conversation";
+    }
+    if (status.missing.length > 0) {
+        const names = status.missing.map(userName).join(", ");
+        return status.known.length > 0
+            ? `E2EE: waiting for ${names}. Shift-click to encrypt now for ${status.known.map(userName).join(", ")}`
+            : `E2EE: waiting for ${names} to share a public key`;
+    }
+    if (status.established) return "End-to-end encryption OFF — click to send encrypted";
+    return status.known.length > 0
+        ? `E2EE: shift-click to encrypt for ${status.known.map(userName).join(", ")}`
+        : "E2EE: waiting for someone to share a public key in this conversation";
 }
 
 const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
@@ -382,26 +439,63 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
     const status = getStatus(channel);
     if (!status.supported) return null;
 
-    const onClick = async () => {
+    const onClick = async (e: React.MouseEvent) => {
         await e2ee.init();
-        if (!status.established) {
-            if (status.recipients.length === 0) return;
-            await announce(channel);
-            if (status.missing.length > 0)
-                showToast(`Shared your public key. Waiting for ${status.missing.map(userName).join(", ")}…`, Toasts.Type.MESSAGE);
+
+        // Turning it off is always a plain toggle, however it got turned on.
+        if (status.enabled) {
+            await e2ee.setChannelEncryptionEnabled(channel.id, false);
+            notify();
             return;
         }
-        await e2ee.setChannelEncryptionEnabled(channel.id, !status.enabled);
+
+        if (!status.announced) {
+            await announce(channel);
+            showToast(
+                status.known.length > 0
+                    ? `Shared your public key. Shift-click to encrypt now for ${status.known.map(userName).join(", ")}, or wait for everyone.`
+                    : "Shared your public key. Waiting for others to share theirs…",
+                Toasts.Type.MESSAGE
+            );
+            return;
+        }
+
+        // Shift-click: don't wait for every recipient's key, encrypt for whoever already has one.
+        // Anyone missing a key just sees the raw ciphertext.
+        if (e.shiftKey) {
+            if (status.known.length === 0) {
+                showToast("Nobody in this conversation has a known E2EE key yet", Toasts.Type.FAILURE);
+                return;
+            }
+            await e2ee.setChannelEncryptionEnabled(channel.id, true);
+            notify();
+            if (status.missing.length > 0 || !status.established) {
+                showToast(`Partial E2EE enabled — only ${status.known.map(userName).join(", ")} can read your messages. Everyone else will see gibberish.`, Toasts.Type.MESSAGE);
+            }
+            return;
+        }
+
+        if (!status.established) {
+            showToast(
+                status.missing.length > 0
+                    ? `Still waiting for ${status.missing.map(userName).join(", ")} to share a key. Shift-click to encrypt now for whoever already has one.`
+                    : "Waiting for someone to share a key in this conversation. Shift-click to check again once someone has.",
+                Toasts.Type.MESSAGE
+            );
+            return;
+        }
+
+        await e2ee.setChannelEncryptionEnabled(channel.id, true);
         notify();
     };
 
     const onContextMenu = (e: React.MouseEvent) => {
         ContextMenuApi.openContextMenu(e, () => (
             <Menu.Menu navId="vc-e2ee-menu" onClose={ContextMenuApi.closeContextMenu} aria-label="E2EE options">
-                {status.established && (
+                {status.known.length > 0 && (
                     <Menu.MenuCheckboxItem
                         id="vc-e2ee-toggle"
-                        label="Encrypt messages"
+                        label={status.established ? "Encrypt messages" : `Encrypt messages (partial — ${status.known.map(userName).join(", ")} only)`}
                         checked={status.enabled}
                         action={async () => {
                             await e2ee.setChannelEncryptionEnabled(channel.id, !status.enabled);
@@ -423,7 +517,9 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
         ));
     };
 
-    const state = !status.established ? "unavailable" : status.enabled ? "on" : "off";
+    const state = status.enabled
+        ? (status.established ? "on" : "partial")
+        : (channel.isPrivate?.() && status.recipients.length === 0 ? "unavailable" : "off");
     const Icon = status.enabled ? LockIcon : LockOpenIcon;
 
     return (
@@ -437,7 +533,7 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
 
 export default definePlugin({
     name: "E2EE",
-    description: "End-to-end encrypt DMs and group DMs with other Vencord users who have this plugin. Exchange public keys once, then everything you type is encrypted before it leaves your client.",
+    description: "End-to-end encrypt DMs, group DMs, and server channels with other Vencord users who have this plugin. Exchange public keys once, then everything you type is encrypted before it leaves your client. Shift-click the lock to encrypt for whoever already has a key without waiting for everyone else — anyone without a key just sees ciphertext.",
     authors: [Devs.Commandtechno],
     tags: ["Chat", "Privacy"],
     dependencies: ["ChatInputButtonAPI", "MessageDecorationsAPI", "MessageEventsAPI", "MessageUpdaterAPI"],
@@ -493,6 +589,7 @@ export default definePlugin({
 
             if (!settings.store.autoAnnounce) return;
             const channel = ChannelStore.getChannel(channelId);
+            if (!channel?.isPrivate?.()) return; // never auto-broadcast a key into a server channel just because it was opened
             const status = getStatus(channel);
             if (status.supported && status.recipients.length > 0 && !status.announced) {
                 await announce(channel);
@@ -524,8 +621,8 @@ export default definePlugin({
         const wasEncrypted = messageStates.get(messageId) === "encrypted";
         const status = getStatus(ChannelStore.getChannel(channelId));
         if (!wasEncrypted && !status.enabled) return;
-        if (!status.established) {
-            showToast("Can't re-encrypt edit: E2EE is no longer established in this conversation", Toasts.Type.FAILURE);
+        if (status.known.length === 0) {
+            showToast("Can't re-encrypt edit: no known E2EE keys in this conversation", Toasts.Type.FAILURE);
             return { cancel: true };
         }
 

@@ -31,6 +31,7 @@ const DS_IDENTITIES = "E2EE_identities";
 const DS_PEERS = "E2EE_peers";
 const DS_ANNOUNCED = "E2EE_announced";
 const DS_CHANNEL_PREFS = "E2EE_channelPrefs";
+const DS_CHANNEL_PEERS = "E2EE_channelPeers";
 
 interface StoredIdentity {
     privateJwk: JsonWebKey;
@@ -114,6 +115,8 @@ let currentFp = "";
 let peersByTag: Map<string, Peer> = new Map();
 let announced: Record<string, string> = {};
 let channelPrefs: Record<string, boolean> = {};
+/** channelId -> user IDs seen announcing a key in that channel. Only meaningful for guild channels, where there's no fixed recipient list like a DM has. */
+let channelPeers: Record<string, string[]> = {};
 
 const pairwiseCache = new Map<string, Promise<CryptoKey>>();
 
@@ -124,15 +127,17 @@ export function init() {
 }
 
 async function load() {
-    const [ids, peers, ann, prefs] = await Promise.all([
+    const [ids, peers, ann, prefs, chanPeers] = await Promise.all([
         DataStore.get<IdentityStore>(DS_IDENTITIES),
         DataStore.get<Record<string, PeerKey>>(DS_PEERS),
         DataStore.get<Record<string, string>>(DS_ANNOUNCED),
         DataStore.get<Record<string, boolean>>(DS_CHANNEL_PREFS),
+        DataStore.get<Record<string, string[]>>(DS_CHANNEL_PEERS),
     ]);
 
     announced = ann ?? {};
     channelPrefs = prefs ?? {};
+    channelPeers = chanPeers ?? {};
 
     identities = new Map();
     if (ids) {
@@ -228,6 +233,7 @@ export function debugSnapshot() {
         peers: [...peersByTag.values()].map(p => ({ userId: p.userId, fp: p.fp, seenAt: new Date(p.seenAt).toISOString() })),
         announced: { ...announced },
         channelPrefs: { ...channelPrefs },
+        channelPeers: { ...channelPeers },
     };
 }
 
@@ -318,6 +324,18 @@ export function isChannelEncryptionEnabled(channelId: string) {
 export function setChannelEncryptionEnabled(channelId: string, enabled: boolean) {
     channelPrefs[channelId] = enabled;
     return DataStore.set(DS_CHANNEL_PREFS, channelPrefs);
+}
+
+/** User IDs that have announced a public key in this channel. Used as the recipient set for guild channels, which have no fixed member list. */
+export function getChannelPeers(channelId: string): string[] {
+    return channelPeers[channelId] ?? [];
+}
+
+export async function addChannelPeer(channelId: string, userId: string) {
+    const list = channelPeers[channelId] ?? (channelPeers[channelId] = []);
+    if (list.includes(userId)) return;
+    list.push(userId);
+    await DataStore.set(DS_CHANNEL_PEERS, channelPeers);
 }
 
 // ---------- crypto ----------

@@ -15,6 +15,10 @@
     color: var(--status-warning, var(--yellow-360));
 }
 
+.vc-e2ee-chat-icon-partial {
+    color: var(--orange-330, #e8912d);
+}
+
 .vc-e2ee-decoration {
     display: inline-flex;
     align-items: center;

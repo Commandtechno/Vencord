@@ -55,7 +55,10 @@ function getTranscriber(): Promise<AutomaticSpeechRecognitionPipeline> {
         try {
             return await pipeline("automatic-speech-recognition", MODEL, {
                 device: "webgpu",
-                dtype: { encoder_model: "fp16", decoder_model_merged: "q4" },
+                // q4 (MatMulNBits) decoder_model_merged is broken for this repo: onnxruntime-web
+                // fails to create a session because the tied embed_tokens/lm_head weight is
+                // missing its dequantization scale. fp16 avoids that quantization path entirely
+                dtype: { encoder_model: "fp16", decoder_model_merged: "fp16" },
             });
         } catch (err) {
             console.warn("[Transcriber] WebGPU unavailable, falling back to WASM", err);
