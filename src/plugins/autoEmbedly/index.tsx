@@ -41,6 +41,11 @@ const DEFAULT_DOMAINS = [
 ].join("\n");
 
 const settings = definePluginSettings({
+    dmsOnly: {
+        type: OptionType.BOOLEAN,
+        description: "Only apply in DMs and group DMs (not servers)",
+        default: true,
+    },
     domains: {
         type: OptionType.STRING,
         description: "Domains that should trigger Embedly (one per line, or comma separated)",
@@ -110,6 +115,7 @@ export default definePlugin({
 
             const channel = ChannelStore.getChannel(message.channel_id);
             if (!channel) return;
+            if (settings.store.dmsOnly && !channel.isPrivate()) return;
 
             try {
                 await runEmbedlyEmbedLinks(channel.id, channel.guild_id, message.id);
