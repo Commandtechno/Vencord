@@ -26,49 +26,42 @@ const EMBED_SUPPRESSED = 1 << 2; // 4
 // to win that race.
 const RESUPPRESS_DELAY_MS = 3000;
 
-const DEFAULT_DOMAINS = [
-    "x.com",
-    "twitter.com",
-    "instagram.com",
-    "tiktok.com",
-    "vm.tiktok.com",
-    "vt.tiktok.com",
-    "reddit.com",
-    "threads.net",
-    "bsky.app",
-    "facebook.com",
-    "pixiv.net",
-].join("\n");
-
 const settings = definePluginSettings({
     dmsOnly: {
         type: OptionType.BOOLEAN,
         description: "Only apply in DMs and group DMs (not servers)",
         default: true,
     },
-    domains: {
-        type: OptionType.STRING,
-        description: "Domains that should trigger Embedly (one per line, or comma separated)",
-        multiline: true,
-        default: DEFAULT_DOMAINS,
-    },
 });
 
-function buildDomainRegex(): RegExp | null {
-    const domains = settings.store.domains
-        .split(/[\n,]/)
-        .map(d => d.trim())
-        .filter(Boolean)
-        .map(d => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+const URL_RE = /https?:\/\/\S+/g;
 
-    if (!domains.length) return null;
-
-    return new RegExp(`https?:\\/\\/(?:www\\.)?(?:${domains.join("|")})\\/\\S+`, "i");
-}
+// Copied verbatim from embed-team/embedly's own link matchers, so we only fire on
+// links Embedly actually knows how to embed (the platforms wired up in main.ts's
+// matchURL — Reddit's matcher exists in the repo but isn't registered there, so
+// it's intentionally left out here too).
+// https://github.com/embed-team/embedly/tree/main/packages/platforms/src/platforms
+const PLATFORM_PATTERNS: RegExp[] = [
+    // twitter.ts
+    /^(?:https?:\/\/)?(?:[\w-]+\.)*(?:twitter|x)\.com\/.*\/status(?:es)?\/(?<tweet_id>[^/?]+)/,
+    // instagram.ts
+    /^(?:https?:\/\/)?(?:[\w-]+\.)*instagram\.com\/(?:[A-Za-z0-9_.]+\/)?(?<ig_type>p|share|reels|reel)\/(?<ig_shortcode>[A-Za-z0-9-_]+)/,
+    // tiktok.ts
+    /^(?:https?:\/\/)?(?:[\w-]+\.)*tiktok\.com(?:\/|$)/,
+    // threads.ts
+    /^(?:https?:\/\/)?(?:[\w-]+\.)*threads\.com\/@.*\/post\/(?<thread_shortcode>[A-Za-z0-9-_]+)/,
+    /^(?:https?:\/\/)?(?:[\w-]+\.)*threads\.com\/share\/[^/?#]+/,
+    // bluesky.ts
+    /^(?:https?:\/\/)?(?:www\.)?bsky\.app\/profile\/(?<actor>[^/?#]+)\/post\/(?<post_id>[^/?#]+)/,
+    // facebook-marketplace.ts
+    /^(?:https?:\/\/)?(?:www\.|m\.)?facebook\.com\/marketplace\/item\/(\d+)\/?(?:[?#].*)?$/,
+];
 
 function messageHasSupportedLink(content: string): boolean {
-    const regex = buildDomainRegex();
-    return regex != null && regex.test(content);
+    const urls = content.match(URL_RE);
+    if (!urls) return false;
+
+    return urls.some(url => PLATFORM_PATTERNS.some(re => re.test(url)));
 }
 
 async function runEmbedlyEmbedLinks(channelId: string, guildId: string | undefined, messageId: string) {
@@ -101,7 +94,7 @@ async function suppressEmbeds(channelId: string, messageId: string) {
 
 export default definePlugin({
     name: "AutoEmbedly",
-    description: "When you send a message with a supported social media link, automatically runs Embedly's \"Embed Links\" command on it and suppresses Discord's own embed",
+    description: "When you send a message with a link Embedly can embed (Twitter/X, Instagram, TikTok, Threads, Bluesky, Facebook Marketplace), automatically runs Embedly's \"Embed Links\" command on it and suppresses Discord's own embed",
     authors: [Devs.Commandtechno],
     tags: ["Chat", "Utility"],
 
