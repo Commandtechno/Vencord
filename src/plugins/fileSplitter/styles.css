@@ -37,3 +37,10 @@
     background: var(--brand-experiment, var(--brand-500));
     transition: width 150ms linear;
 }
+
+.vc-filesplitter-media {
+    display: block;
+    max-width: 100%;
+    max-height: 350px;
+    border-radius: 4px;
+}

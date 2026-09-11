@@ -16,21 +16,48 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import "./ipcMain";
+import "@main/ipcMain";
 
+import { initCsp } from "@main/csp";
+import { pluginStreamHandlers } from "@main/pluginStreams";
+import { RendererSettings } from "@main/settings";
+import { IS_VANILLA, THEMES_DIR } from "@main/utils/constants";
+import { ensureSafePath } from "@main/utils/ensureSafePath";
+import { installExt } from "@main/utils/extensions";
 import { app, net, protocol } from "electron";
 import { join } from "path";
 import { pathToFileURL } from "url";
 
-import { initCsp } from "./csp";
-import { RendererSettings } from "./settings";
-import { IS_VANILLA, THEMES_DIR } from "./utils/constants";
-import { ensureSafePath } from "./utils/ensureSafePath";
-import { installExt } from "./utils/extensions";
-
 if (IS_VESKTOP || !IS_VANILLA) {
+    // Must happen before app is ready. A plugin (e.g. FileSplitter) can register into
+    // pluginStreamHandlers and have its response served through vcstream://<PluginName>/... — a
+    // dedicated scheme so it can be privileged for actual media streaming (stream + standard) without
+    // touching the privilege level of our existing, unprivileged, fetch()-only vencord:// scheme below.
+    protocol.registerSchemesAsPrivileged([
+        {
+            scheme: "vcstream",
+            privileges: {
+                standard: true,
+                secure: true,
+                stream: true,
+                supportFetchAPI: true,
+                corsEnabled: true,
+            },
+        },
+    ]);
+
     app.whenReady().then(() => {
-        protocol.handle("vencord", ({ url: unsafeUrl }) => {
+        protocol.handle("vcstream", request => {
+            // Standard schemes (which this is, so <video>/<audio> treat it as real streamable
+            // media) get their host lowercased by the URL parser, so match case-insensitively
+            // against however the plugin actually registered its name.
+            const host = new URL(request.url).host.toLowerCase();
+            const entry = [...pluginStreamHandlers].find(([name]) => name.toLowerCase() === host);
+            return entry ? entry[1](request) : new Response(null, { status: 404 });
+        });
+
+        protocol.handle("vencord", request => {
+            const { url: unsafeUrl } = request;
             let url = decodeURI(unsafeUrl).slice("vencord://".length).replace(/\?v=\d+$/, "");
 
             if (url.endsWith("/")) url = url.slice(0, -1);

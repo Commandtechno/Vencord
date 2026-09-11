@@ -31,6 +31,19 @@ export interface Segment {
 
 export const cl = classNameFactory("transcribe-");
 
+// finds the <audio> element playing this attachment. matches on the URL
+// without its query string, since discord rotates the CDN's signed params
+// (ex/is/hm) independently of the message data we hold, and falls back to
+// audio.src directly in case the player doesn't nest a <source> child
+function findAudioElement(url: string): HTMLAudioElement | null {
+  const base = url.split("?")[0];
+  for (const audio of document.querySelectorAll<HTMLAudioElement>("audio")) {
+    const src = audio.currentSrc || audio.src || audio.querySelector("source")?.src || "";
+    if (src.split("?")[0] === base) return audio;
+  }
+  return null;
+}
+
 export function TranscriptionAccessory({ message, }: { message: Message; }) {
   const isVoiceMessage = (message.flags & MessageFlags.IS_VOICE_MESSAGE) !== 0;
   if (!isVoiceMessage) return null;
@@ -40,19 +53,44 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
   const [activeSegment, setActiveSegment] = useState<number | null>(null);
 
   useEffect(() => {
-    const sourceElement = document.querySelector<HTMLSourceElement>(`audio > source[src="${message.attachments[0].url}"]`);
-    if (!sourceElement || !segments) return;
+    if (!segments) return;
 
-    const audioElement = sourceElement.parentElement as HTMLAudioElement;
-    audioElement.ontimeupdate = () => {
+    const url = message.attachments[0].url;
+    let audioElement: HTMLAudioElement | null = null;
+    let observer: MutationObserver | null = null;
+
+    const onTimeUpdate = () => {
+      if (!audioElement) return;
       const { currentTime } = audioElement;
       const segmentIndex = segments.findIndex(segment => segment.start <= currentTime && segment.end > currentTime);
-      if (segmentIndex !== activeSegment) {
-        // console.log('setting active segment', segmentIndex);
-        setActiveSegment(segmentIndex);
-      }
+      setActiveSegment(prev => prev === segmentIndex ? prev : segmentIndex);
     };
-  }, [segments]);
+
+    // the voice message player can mount after this effect runs (e.g. while
+    // the message list is still virtualizing), so keep retrying until it
+    // shows up instead of giving up on a single missed lookup
+    const tryAttach = () => {
+      if (audioElement) return true;
+      const found = findAudioElement(url);
+      if (!found) return false;
+
+      audioElement = found;
+      audioElement.addEventListener("timeupdate", onTimeUpdate);
+      observer?.disconnect();
+      observer = null;
+      return true;
+    };
+
+    if (!tryAttach()) {
+      observer = new MutationObserver(tryAttach);
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    return () => {
+      observer?.disconnect();
+      audioElement?.removeEventListener("timeupdate", onTimeUpdate);
+    };
+  }, [segments, message.attachments]);
 
   useEffect(() => {
     const { id, url } = message.attachments[0];
@@ -90,12 +128,10 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
     <div className={cl("accessory")}>
       <div ref={transcriptionElement} className={cl("transcription", expanded && "expanded")}>
         {error ?? (segments ? segments.map((segment, i) => (
-          <div key={i} className={cl("segment", activeSegment === i && "active")} onClick={ev => {
-            console.log(segment.start, i);
-            const sourceElement = document.querySelector<HTMLSourceElement>(`audio > source[src="${message.attachments[0].url}"]`);
-            if (!sourceElement || !segments) return;
+          <div key={i} className={cl("segment", activeSegment === i && "active")} onClick={() => {
+            const audioElement = findAudioElement(message.attachments[0].url);
+            if (!audioElement) return;
 
-            const audioElement = sourceElement.parentElement as HTMLAudioElement;
             audioElement.currentTime = segment.start;
             setActiveSegment(i);
           }}>
