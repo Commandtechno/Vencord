@@ -1,0 +1,40 @@
+.vc-personalpurge-status {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background: var(--background-secondary);
+    max-width: 480px;
+}
+
+.vc-personalpurge-info {
+    color: var(--text-muted);
+}
+
+.vc-personalpurge-error {
+    color: var(--text-danger, var(--status-danger));
+}
+
+.vc-personalpurge-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.vc-personalpurge-progress-track {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--background-modifier-accent);
+    overflow: hidden;
+}
+
+.vc-personalpurge-progress-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--status-danger, #da373c);
+    transition: width 150ms linear;
+}
