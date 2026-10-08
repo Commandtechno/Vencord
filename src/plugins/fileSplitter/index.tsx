@@ -16,7 +16,7 @@ import definePlugin from "@utils/types";
 import { Channel, CloudUpload as TCloudUpload, Message } from "@vencord/discord-types";
 import { CloudUploadPlatform, PremiumType } from "@vencord/discord-types/enums";
 import { findLazy } from "@webpack";
-import { Alerts, Constants, MessageActions, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, Toasts, useEffect, useMemo, UserStore, useState } from "@webpack/common";
+import { Alerts, Constants, MessageActions, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, useEffect, useMemo, UserStore, useState } from "@webpack/common";
 
 const cl = classNameFactory("vc-filesplitter-");
 const logger = new Logger("FileSplitter");
@@ -297,7 +297,7 @@ async function sendSplitFile(file: File, channelId: string) {
     if (statusMessageId) {
       await editStatusMessage(channelId, statusMessageId, `📦 Failed to fully send **${file.name}**: ${err}`).catch(() => { });
     }
-    showToast(`Failed to send "${file.name}": ${err}`, Toasts.Type.FAILURE);
+    showToast(`Failed to send "${file.name}": ${err}`, "failure");
   } finally {
     if (statusMessageId) transfers.delete(statusMessageId);
   }

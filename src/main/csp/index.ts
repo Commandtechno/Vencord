@@ -73,9 +73,10 @@ export const CspPolicies: PolicyMap = {
     "*.huggingface.co": ConnectSrc,
     "*.hf.co": ConnectSrc,
 
-    // Tenor, used by TenorSearch plugin and some themes
+    // Tenor & Giphy, used by GifProviderSwitcher plugin and some themes
     "*.tenor.com": ImageAndMediaSrc,
     "*.tenor.co": ImageAndMediaSrc,
+    "*.giphy.com": ImageAndMediaSrc,
 };
 
 const findHeader = (headers: PolicyMap, headerName: Lowercase<string>) => {

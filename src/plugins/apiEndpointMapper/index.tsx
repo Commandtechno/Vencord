@@ -8,15 +8,16 @@ import { definePluginSettings } from "@api/Settings";
 import { Button } from "@components/Button";
 import definePlugin, { OptionType } from "@utils/types";
 import { saveFile } from "@utils/web";
-import { Toasts, useEffect, useState } from "@webpack/common";
+import type { ToastType } from "@vencord/discord-types";
+import { showToast, useEffect, useState } from "@webpack/common";
 
 import { configureGateway, handleRawPacket, startGatewayCapturing, stopGatewayCapturing } from "./gatewayCapture";
 import { buildGatewayExport, clearGateway, ensureGatewayLoaded, flushGateway, getGatewayStats, resetLegacyGatewayData } from "./gatewayStore";
 import { configure, startCapturing, stopCapturing } from "./network";
 import { buildExport, clearAll, ensureLoaded, flush, getStats } from "./store";
 
-function toast(message: string, type: string = Toasts.Type.SUCCESS) {
-    Toasts.show({ message, id: Toasts.genId(), type });
+function toast(message: string, type: ToastType = "success") {
+    showToast(message, type);
 }
 
 async function doExport() {
@@ -26,7 +27,7 @@ async function doExport() {
     const { endpointCount } = getStats();
     const { eventTypeCount } = getGatewayStats();
     if (endpointCount === 0 && eventTypeCount === 0) {
-        toast("Nothing captured yet — browse around Discord first.", Toasts.Type.FAILURE);
+        toast("Nothing captured yet — browse around Discord first.", "failure");
         return;
     }
 

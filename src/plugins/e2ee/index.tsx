@@ -20,7 +20,7 @@ import definePlugin, { IconComponent, OptionType } from "@utils/types";
 import { Channel, CloudUpload as TCloudUpload } from "@vencord/discord-types";
 import { ChannelType } from "@vencord/discord-types/enums";
 import { findByCodeLazy, findLazy, findStoreLazy } from "@webpack";
-import { Alerts, ChannelStore, ContextMenuApi, FluxDispatcher, Menu, MessageStore, SelectedChannelStore, showToast, Toasts, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
+import { Alerts, ChannelStore, ContextMenuApi, FluxDispatcher, Menu, MessageStore, SelectedChannelStore, showToast, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
 
 import * as e2ee from "./crypto";
 
@@ -99,7 +99,7 @@ function IdentitySettings() {
                         onConfirm: async () => {
                             await e2ee.generateIdentity();
                             notify();
-                            showToast("New identity key generated", Toasts.Type.SUCCESS);
+                            showToast("New identity key generated", "success");
                         }
                     })}
                 >
@@ -229,7 +229,7 @@ async function announce(channel: Channel) {
         await sendMessage(channel.id, { content: e2ee.buildBeacon() });
     } catch (err) {
         e2ee.logger.error("Failed to send key announcement", err);
-        showToast("Failed to share E2EE public key", Toasts.Type.FAILURE);
+        showToast("Failed to share E2EE public key", "failure");
     }
 }
 
@@ -425,20 +425,20 @@ async function encryptOutgoing(channelId: string, content: string): Promise<stri
     // Only encrypt to recipients we actually have a key for. Anyone else (missing keys, or
     // simply anyone else reading a guild channel) will just see the raw ciphertext — that's expected.
     if (status.known.length === 0) {
-        showToast("No known E2EE keys in this conversation — message not sent", Toasts.Type.FAILURE);
+        showToast("No known E2EE keys in this conversation — message not sent", "failure");
         return null;
     }
     try {
         const encrypted = await e2ee.encrypt(content, status.known);
         dbg("encrypted outgoing message", { channelId, plainLen: content.length, cipherLen: encrypted.length, recipients: status.known, totalRecipients: status.recipients.length });
         if (encrypted.length > maxMessageLength()) {
-            showToast(`Message too long to send encrypted (${encrypted.length}/${maxMessageLength()} characters after encryption)`, Toasts.Type.FAILURE);
+            showToast(`Message too long to send encrypted (${encrypted.length}/${maxMessageLength()} characters after encryption)`, "failure");
             return null;
         }
         return encrypted;
     } catch (err) {
         e2ee.logger.error("Failed to encrypt message", err);
-        showToast("Failed to encrypt message — not sent", Toasts.Type.FAILURE);
+        showToast("Failed to encrypt message — not sent", "failure");
         return null;
     }
 }
@@ -484,7 +484,7 @@ function patchCloudUpload() {
         return encryptUpload(this)
             .catch(err => {
                 e2ee.logger.error("Failed to encrypt attachment, refusing to upload it unencrypted", err);
-                showToast(`Failed to encrypt "${this.filename}" — not sent`, Toasts.Type.FAILURE);
+                showToast(`Failed to encrypt "${this.filename}" — not sent`, "failure");
                 throw err;
             })
             .then(() => origCloudUploadUpload!.call(this));
@@ -673,7 +673,7 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
                 status.known.length > 0
                     ? `Shared your public key. Shift-click to encrypt now for ${status.known.map(userName).join(", ")}, or wait for everyone.`
                     : "Shared your public key. Waiting for others to share theirs…",
-                Toasts.Type.MESSAGE
+                "message"
             );
             return;
         }
@@ -682,13 +682,13 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
         // Anyone missing a key just sees the raw ciphertext.
         if (e.shiftKey) {
             if (status.known.length === 0) {
-                showToast("Nobody in this conversation has a known E2EE key yet", Toasts.Type.FAILURE);
+                showToast("Nobody in this conversation has a known E2EE key yet", "failure");
                 return;
             }
             await e2ee.setChannelEncryptionEnabled(channel.id, true);
             notify();
             if (status.missing.length > 0 || !status.established) {
-                showToast(`Partial E2EE enabled — only ${status.known.map(userName).join(", ")} can read your messages. Everyone else will see gibberish.`, Toasts.Type.MESSAGE);
+                showToast(`Partial E2EE enabled — only ${status.known.map(userName).join(", ")} can read your messages. Everyone else will see gibberish.`, "message");
             }
             return;
         }
@@ -698,7 +698,7 @@ const E2EEChatBarButton: ChatBarButtonFactory = ({ channel, isMainChat }) => {
                 status.missing.length > 0
                     ? `Still waiting for ${status.missing.map(userName).join(", ")} to share a key. Shift-click to encrypt now for whoever already has one.`
                     : "Waiting for someone to share a key in this conversation. Shift-click to check again once someone has.",
-                Toasts.Type.MESSAGE
+                "message"
             );
             return;
         }
@@ -790,7 +790,7 @@ export default definePlugin({
         dbg("started", { apiStatus, ...e2ee.debugSnapshot() });
         if (!apiStatus.MessageEventsAPI) {
             e2ee.logger.error("MessageEventsAPI is not enabled — outgoing messages will NOT be intercepted or encrypted! Fully restart Discord.");
-            showToast("E2EE: message send hook is not active — fully restart Discord!", Toasts.Type.FAILURE);
+            showToast("E2EE: message send hook is not active — fully restart Discord!", "failure");
         }
 
         const channelId = SelectedChannelStore.getChannelId();
@@ -860,7 +860,7 @@ export default definePlugin({
         const status = getStatus(ChannelStore.getChannel(channelId));
         if (!wasEncrypted && !status.enabled) return;
         if (status.known.length === 0) {
-            showToast("Can't re-encrypt edit: no known E2EE keys in this conversation", Toasts.Type.FAILURE);
+            showToast("Can't re-encrypt edit: no known E2EE keys in this conversation", "failure");
             return { cancel: true };
         }
 
