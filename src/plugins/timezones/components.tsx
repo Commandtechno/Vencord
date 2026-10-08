@@ -10,6 +10,7 @@ import { classes } from "@utils/misc";
 import { findByPropsLazy } from "@webpack";
 import { Text, Tooltip } from "@webpack/common";
 import { PropsWithChildren } from "react";
+
 import { userTimezones } from "./api";
 
 const cl = classNameFactory("tz-");
@@ -60,7 +61,7 @@ function ClockIcon(props: IconProps) {
 
 function TimezoneTooltip({ tz }: { tz: string; }) {
   return (
-    <Text variant="text-sm/bold">{Intl.DateTimeFormat(undefined, { timeZone: tz, timeStyle: 'short' }).format()}</Text>
+    <Text variant="text-sm/bold">{Intl.DateTimeFormat(undefined, { timeZone: tz, timeStyle: "short" }).format()}</Text>
   );
 }
 

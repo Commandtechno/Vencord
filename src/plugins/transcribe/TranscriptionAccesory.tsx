@@ -55,7 +55,7 @@ export function TranscriptionAccessory({ message, }: { message: Message; }) {
   useEffect(() => {
     if (!segments) return;
 
-    const url = message.attachments[0].url;
+    const { url } = message.attachments[0];
     let audioElement: HTMLAudioElement | null = null;
     let observer: MutationObserver | null = null;
 
